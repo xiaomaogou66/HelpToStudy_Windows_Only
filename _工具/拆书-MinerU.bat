@@ -23,6 +23,7 @@ if exist "%~dp0.venv\Scripts\mineru-open-api.exe" (
     set "MINERU_CLI=%USERPROFILE%\obsidian-vault-mcp\.venv\Scripts\mineru-open-api.exe"
 ) else (
     set "MINERU_CLI="
+    for /f "delims=" %%i in ('where mineru-open-api 2^>nul') do if not defined MINERU_CLI set "MINERU_CLI=%%i"
 )
 
 rem Pass paths to the Python script

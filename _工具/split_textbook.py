@@ -570,7 +570,8 @@ def split_chunks(text: str, max_chars: int, overlap: int):
 def safe_name(name: str, limit: int = 40) -> str:
     name = re.sub(r'[\\/:*?"<>|#^\[\]]', "", name).strip()
     name = re.sub(r"\s+", " ", name)
-    return name[:limit] or "未命名"
+    name = name[:limit] or "未命名"
+    return name.rstrip(" .")
 
 
 # ---------- 标题感知切分（准确识别章节） ----------
