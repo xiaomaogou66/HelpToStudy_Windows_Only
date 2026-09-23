@@ -12,6 +12,20 @@ _备份/
 mineru_token.txt
 *_token*.txt
 
+# ---- 日程安排层：只发布骨架，个人内容不进版本库 ----
+05-日程安排/06-日志/*/
+05-日程安排/_归档/
+05-日程安排/_资源/anki/
+05-日程安排/_资源/*.ical
+05-日程安排/_资源/日历/课表-当前.ics
+05-日程安排/_资源/日历/课表-历史/
+05-日程安排/_脚本/.打卡.log
+05-日程安排/_脚本/calender-*.json
+05-日程安排/_脚本/service-account*.json
+05-日程安排/_脚本/token.json
+05-日程安排/_脚本/credentials.json
+scripts/scrub-map.local.txt
+
 # ---- Python ----
 __pycache__/
 *.pyc

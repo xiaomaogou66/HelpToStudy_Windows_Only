@@ -7,10 +7,10 @@ step: 1
 
 ## 第一步：运行拆书工具
 
-把 PDF / EPUB / Word 教材放到任意位置，然后运行：
+把教材 **PDF** 放到任意位置，然后运行：
 
 ```
-python "_工具/split_textbook.py" "教材文件路径" --out "04-教材分块"
+python "_工具/split_textbook.py" "教材.pdf" --out "04-教材分块" --ocr mineru --mineru-token "你的Token"
 ```
 
 工具会生成 `04-教材分块/<书名>/` 文件夹，默认**按章节拆分**，
@@ -18,9 +18,9 @@ python "_工具/split_textbook.py" "教材文件路径" --out "04-教材分块"
 
 > 一章一个文件，章节内部不再切分，公式不会因截断显示错误。
 
-## 扫描版 / 数学书（公式多）？用 MinerU 云端版（公式转 LaTeX）
+## Linux 版拆书 = MinerU 云端（公式转 LaTeX）
 
-本地 RapidOCR 不识别公式，数学书请用 MinerU 云端：
+Linux 版只保留 MinerU 拆书，教材请提供 PDF（扫描版 / 数学书均可）：
 
 ```
 python "_工具/split_textbook.py" "教材文件路径" --out "04-教材分块" --ocr mineru --mineru-token "你的Token"
@@ -30,21 +30,26 @@ python "_工具/split_textbook.py" "教材文件路径" --out "04-教材分块" 
 
 1. 免费注册 https://mineru.net，在「API管理 → Token」复制 Token
 2. 双击 `_工具/设置MinerU令牌.bat` 保存 Token（只存本机，之后可省略 `--mineru-token`）
-3. 把教材 PDF 拖到 `_工具/拆书-MinerU.bat` 上，按回车
+3. 双击 `_工具/拆书.bat`，选择教材 PDF 并回车
 
 特点：
 
-- 工具自动把整本书切成 ≤200 页的小文件上传（每账号每日免费 1000 页）
+- 工具自动把整本书切成「≤200 页 且 ≤25 MB」的小文件上传（每账号每日免费 1000 页）；
+  扫描页太大时先自动降到 200 DPI（只降体积不降识别精度），单份上传超时还会自动切小重传
 - 扫描版 OCR + 公式转 LaTeX + 表格保留结构，数学书首选
 - **按章节标题准确切分**：先识别目录/页眉里的 "Chapter N"，再到正文定位，
-  **一章一个文件**，章节内部不再切分，公式不会因截断显示错误
+  **一章一个文件**，章节内部不再切分，公式不会因截断显示错误；
+  章标题被 OCR 打掉时（如《某外语教材》每课的 UNIDAD）会自动改按
+  「每章固定收尾小节」（如「作业 (Trabajos de casa)」）定位章界
 - 插图自动保留：MinerU 解析出的图片会复制到书文件夹的 `images/`，Obsidian 直接显示
 - 完成后额外生成 `00-MinerU解析全文.md`
 - 英文书默认 `--mineru-language en`；中文书加 `--mineru-language ch`
 - 想先看分块计划不耗额度：加 `--mineru-dry-run`
+- 上传总超时（`context deadline exceeded`）：再加 `--mineru-chunk-mb 8` 或
+  `--mineru-dpi 150`
 - 重复拆分同一本书不会产生重复文件夹，旧文件自动备份到 `_备份/`
-- 已经解析过、想重新切分？把 `00-MinerU解析全文.md` 拖到
-  `_工具/拆书-MinerU.bat`（自动识别为全文重切分），不耗额度
+- 已经解析过、想重新切分？把 `00-MinerU解析全文.md` 交给
+  `_工具/拆书.bat`（自动识别为全文重切分），不耗额度
 
 > 一章一个文件：章节内不再切块。`--split-mode` 只有 `auto`/`chapter`（均按章拆分）。
 

@@ -1,0 +1,19 @@
+{
+  "calendar": "日程安排 (Obsidian)",
+  "calendar_id": "",
+  "_calendar_id说明": "Google 后端必填：Google 日历 → 该日历 → 设置 → 日历 ID。建好专用日历后把它共享给服务账号（权限：更改事件）。",
+  "credentials_file": "",
+  "_credentials_file说明": "服务账号密钥路径。建议放库外，如 /home/你/.config/schedule-sync/service-account.json（留空则自动找 _脚本/service-account.json）。",
+  "timezone": "Asia/Shanghai",
+  "scope": "app",
+  "reminder_minutes": 10,
+  "completed": "prefix",
+  "window_past_days": 14,
+  "window_future_days": 180,
+  "task_globs": ["05-日程安排/06-日志/*/????-W??.md", "05-日程安排/04-检查点与待核实.md"],
+  "_task_globs说明": "周决策笔记 = 06-日志/<周号>/<周号>.md（一周一个文件夹）；只扫那里的任务，扫不到打卡页和日记",
+  "ics_files": ["05-日程安排/_资源/日历/课表-当前.ics"],
+  "ics_color_id": "7",
+  "ics_reminder_minutes": 20,
+  "ics_skip_summary_prefixes": ["📚"]
+}

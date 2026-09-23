@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-把厚教材（PDF / EPUB / Word .docx）拆成适合 AI 对话的小分块笔记。
+把厚教材 PDF 拆成适合 AI 对话的小分块笔记（**全走 MinerU 云端识别**，不做本地提取）。
 
 用法:
-    python split_textbook.py "教材文件路径" --out "04-教材分块"
-
-扫描版 PDF（图片型、没有文字层）:
-    # MinerU 云端解析（公式转 LaTeX，适合数学书；每日免费 1000 页）
-    python split_textbook.py "教材文件路径" --out "04-教材分块" --ocr mineru --mineru-token "你的Token"
+    python split_textbook.py "教材.pdf" --out "04-教材分块" --ocr mineru --mineru-token "你的Token"
+    python split_textbook.py "00-MinerU解析全文.md" --out "04-教材分块" --split-mode chapter
 
 参数:
     --max-chars / --overlap   已停用：一章一个文件，不再按字数切块
@@ -18,22 +15,23 @@
     01-全书大纲.md（章节大纲 + 进度勾选）以及按章节切好的 markdown 笔记。
     一章一个文件，章节内部不再切分，公式不会因截断显示错误。
     识别不到章节时全书保存为一个文件并提示校准，绝不乱切。
+    仅支持 PDF（MinerU 云端 OCR，公式转 LaTeX）与 MinerU 解析全文 .md 重切分。
 
 安全与防重复:
     每本书生成稳定的 book_id；重复拆分同一本书不会产生重复文件夹，
-    旧文件会自动备份到 <书名>/_备份/ 后原地更新（最多保留 5 份历史）。
+    旧文件会自动备份到库外 ~/obsidian_backups/拆书/<书名>/ 后原地更新（最多保留 5 份历史）。
 """
 
 import argparse
 import hashlib
 import os
-import posixpath
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+from collections import deque
 from datetime import date
 from pathlib import Path
 
@@ -44,9 +42,9 @@ try:
 except Exception:
     pass
 
-SUPPORTED = {".pdf", ".epub", ".docx"}
+SUPPORTED = {".pdf"}
 
-# 章节词：英文 / 意大利语 / 西班牙语（含常见 OCR 无重音变体）
+# 章节词：英文 / 意大利语 / 外语（含常见 OCR 无重音变体）
 CHAPTER_WORD = r"(?:chapter|chap\.?|capitolo|capitulo|cap[íi]tulo|cap\.?)"
 
 # 锚点/目录用章节词（比 CHAPTER_WORD 更全：含 Lesson/Unit/Lezione 等）
@@ -82,12 +80,13 @@ CHAPTER_RE = re.compile(
 
 # MinerU 云端识别：可执行文件与 Token 文件的位置（可移植解析）
 def _resolve_mineru_cli() -> str:
-    """按顺序查找 mineru-open-api：环境变量 > 本库虚拟环境 > 常见安装位置。"""
+    """按顺序查找 mineru-open-api：环境变量 > 本库虚拟环境（Linux/Windows）> 常见安装位置。"""
     for env_name in ("AIWF_MINERU_CLI", "MINERU_CLI"):
         env = os.environ.get(env_name, "").strip()
         if env:
             return env
     candidates = [
+        Path(__file__).resolve().parent / ".venv" / "bin" / "mineru-open-api",
         Path(__file__).resolve().parent / ".venv" / "Scripts" / "mineru-open-api.exe",
         Path.home() / "obsidian-vault-mcp" / ".venv" / "Scripts" / "mineru-open-api.exe",
         Path(r"D:\obsidian-vault-mcp\.venv\Scripts\mineru-open-api.exe"),
@@ -118,9 +117,22 @@ def _resolve_mineru_token_file() -> Path:
 MINERU_DEFAULT_CLI = _resolve_mineru_cli()
 MINERU_TOKEN_FILE = _resolve_mineru_token_file()
 
-# 安全写入：备份目录名与保留份数
-BACKUP_DIR_NAME = "_备份"
+# 安全写入：备份保留份数；备份一律放【库外】，避免在 Obsidian 图谱里产生重复节点
+BACKUP_DIR_NAME = "_备份"  # 仅用于兜底（未设置书目录时）
 BACKUP_KEEP = 5
+BACKUP_HOME = Path.home() / "obsidian_backups" / "拆书"
+
+_BOOK_BACKUP_ROOT: "Path | None" = None
+
+
+def set_book_backup_root(book_id: str) -> None:
+    """在确定书名文件夹后调用：本书的备份根目录 = ~/obsidian_backups/拆书/<书名>/"""
+    global _BOOK_BACKUP_ROOT
+    _BOOK_BACKUP_ROOT = BACKUP_HOME / book_id
+
+
+def book_backup_root(path: Path) -> Path:
+    return _BOOK_BACKUP_ROOT or (path.parent / BACKUP_DIR_NAME)
 
 
 # ---------- 安全写入（借鉴 obsidian-vault-mcp：原子替换 + 自动备份） ----------
@@ -136,9 +148,9 @@ def prune_backups(backup_root: Path, keep: int = BACKUP_KEEP) -> None:
 
 
 def backup_if_exists(path: Path) -> None:
-    """覆盖前先把旧文件复制到 <目录>/_备份/<时间戳>/。"""
+    """覆盖前先把旧文件复制到库外 ~/obsidian_backups/拆书/<书名>/<时间戳>/。"""
     if path.exists():
-        backup_root = path.parent / BACKUP_DIR_NAME
+        backup_root = book_backup_root(path)
         stamp = time.strftime("%Y%m%d-%H%M%S")
         dest_dir = backup_root / stamp
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -167,131 +179,7 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-# ---------- 文本提取 ----------
-
-def extract_pdf(path: Path) -> str:
-    texts = []
-    try:
-        import pdfplumber
-
-        with pdfplumber.open(path) as pdf:
-            for page in pdf.pages:
-                t = page.extract_text() or ""
-                if t.strip():
-                    texts.append(t)
-        if texts:
-            return "\n\n".join(texts)
-    except Exception as exc:  # noqa: BLE001
-        print(f"[提示] pdfplumber 读取失败，改用 pypdf：{exc}")
-
-    import pypdf
-
-    reader = pypdf.PdfReader(str(path))
-    for page in reader.pages:
-        t = page.extract_text() or ""
-        if t.strip():
-            texts.append(t)
-    if not texts:
-        print(
-        "[警告] 这本 PDF 提取不到文字，可能是扫描版（图片型）。\n"
-        "       请用 --ocr mineru（云端，公式转 LaTeX）。"
-        )
-    return "\n\n".join(texts)
-
-
-def extract_docx(path: Path) -> str:
-    import docx
-    from docx.oxml.ns import qn
-    from docx.table import Table
-    from docx.text.paragraph import Paragraph
-
-    document = docx.Document(str(path))
-
-    def iter_blocks():
-        body = document.element.body
-        for child in body.iterchildren():
-            if child.tag == qn("w:p"):
-                yield Paragraph(child, document)
-            elif child.tag == qn("w:tbl"):
-                yield Table(child, document)
-
-    parts = []
-    for block in iter_blocks():
-        if isinstance(block, Paragraph):
-            t = block.text.strip()
-            if t:
-                parts.append(t)
-        else:
-            for row in block.rows:
-                cells = [c.text.strip() for c in row.cells]
-                if any(cells):
-                    parts.append(" | ".join(cells))
-    return "\n\n".join(parts)
-
-
-def extract_epub(path: Path) -> str:
-    import zipfile
-
-    from lxml import etree, html
-
-    parts = []
-    with zipfile.ZipFile(path) as z:
-        names = z.namelist()
-        opf = next((n for n in names if n.lower().endswith(".opf")), None)
-        order = None
-        if opf:
-            try:
-                root = etree.fromstring(z.read(opf))
-                ns = {
-                    "d": "http://www.idpf.org/2007/opf",
-                    "x": "http://www.w3.org/1999/xhtml",
-                }
-                manifest = {}
-                for item in root.xpath("//d:manifest/d:item", namespaces=ns):
-                    manifest[item.get("id")] = item.get("href")
-                spine_ids = [
-                    i.get("idref")
-                    for i in root.xpath("//d:spine/d:itemref", namespaces=ns)
-                ]
-                base = posixpath.dirname(opf)
-                order = []
-                for sid in spine_ids:
-                    href = manifest.get(sid)
-                    if href:
-                        order.append(
-                            posixpath.normpath(posixpath.join(base, href)).replace("\\", "/")
-                        )
-            except Exception:  # noqa: BLE001
-                order = None
-
-        files = order or sorted(
-            n for n in names if n.lower().endswith((".xhtml", ".html", ".htm"))
-        )
-        for f in files:
-            try:
-                raw = z.read(f)
-                tree = html.fromstring(raw)
-                for bad in tree.xpath("//script|//style|//nav|//title"):
-                    parent = bad.getparent()
-                    if parent is not None:
-                        parent.remove(bad)
-                txt = tree.text_content() or ""
-                if txt.strip():
-                    parts.append(txt.strip())
-            except Exception:  # noqa: BLE001
-                continue
-    return "\n\n".join(parts)
-
-
-def extract_text(path: Path) -> str:
-    suffix = path.suffix.lower()
-    if suffix == ".pdf":
-        return extract_pdf(path)
-    if suffix == ".docx":
-        return extract_docx(path)
-    if suffix == ".epub":
-        return extract_epub(path)
-    raise ValueError(f"不支持的格式: {suffix}")
+# ---------- 说明：全走 MinerU 流程（本地文字层提取已下线：EPUB/Word 请先转 PDF） ----------
 
 
 # ---------- OCR（扫描版 PDF） ----------
@@ -335,8 +223,8 @@ def find_mineru_cli(cli_arg: str) -> str:
             return c
     raise RuntimeError(
         "找不到 MinerU 命令行工具。\n"
-        "请先安装：_工具\\.venv\\Scripts\\pip.exe install mineru-open-api\n"
-        "或用 --mineru-cli 指定 mineru-open-api.exe 的完整路径。"
+        "请先运行安装脚本创建虚拟环境（_工具/.venv），\n"
+        "或用 --mineru-cli 指定 mineru-open-api 的完整路径。"
     )
 
 
@@ -360,22 +248,198 @@ def get_mineru_token(token_arg: str) -> str:
     return token
 
 
-def split_pdf_for_mineru(src: Path, chunk_pages: int, tmpdir: Path):
-    """把 PDF 按页切成 ≤chunk_pages 的小文件（MinerU 单文件限制：200MB / 600 页）。"""
-    from pypdf import PdfReader, PdfWriter
+# ---------- MinerU 上传分块（页数 + 体积双上限） ----------
+
+MINERU_MAX_PAGES = 600  # MinerU 单文件页数硬上限
+MINERU_MAX_MB = 200  # MinerU 单文件体积硬上限
+
+# 上传阶段超时的特征（mineru-open-api 是 Go 写的，HTTP 客户端有固定超时，
+# 100MB+ 的扫描件在 1-2 MB/s 的上行带宽下必挂：context deadline exceeded）
+TIMEOUT_MARKERS = (
+    "context deadline exceeded",
+    "client.timeout exceeded",
+    "timeout awaiting response headers",
+    "tls handshake timeout",
+    "i/o timeout",
+    "connection reset by peer",
+)
+
+
+class MineruAuthError(RuntimeError):
+    """Token 无效 / 当日额度受限（重试没有意义）。"""
+
+
+class MineruUploadTimeout(RuntimeError):
+    """上传超时：把这一份切小再传通常就能成功。"""
+
+
+def _find_gs() -> str:
+    """找 Ghostscript（用于把超大扫描件降采样，减小上传体积）。"""
+    for name in ("gs", "gsc", "gswin64c", "gswin32c", "gs-noX11"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return ""
+
+
+MINERU_CACHE_KEEP = 6
+
+# 已知书系的「每章固定收尾小节」预设（可选扩展点）：(书名关键词, 收尾小节正则, 章标题特征正则)
+# 不命中也没关系：默认的 auto 会从正文自己挖（《某外语教材》已能自动识别，无需预设）
+#   ("某外语教材", r"作业\s*\(Trabajos de casa", r"^\s*(?:#{1,6}\s*)?(?:[A-Za-z田\s]{0,8})?\b(?:UNIDAD|…)"),
+END_ANCHOR_PRESETS = []
+
+
+def _mineru_cache_path(src: Path, dpi: int) -> Path:
+    """降采样结果的缓存路径（按文件名+大小+mtime+DPI 区分）。"""
+    cache_dir = Path(__file__).resolve().parent / ".mineru_cache"
+    st = src.stat()
+    key = hashlib.md5(
+        f"{src.name}|{st.st_size}|{int(st.st_mtime)}|{dpi}".encode("utf-8", "replace")
+    ).hexdigest()[:12]
+    safe = re.sub(r"[^\w.-]+", "_", src.stem)[:40]
+    return cache_dir / f"{safe}-{key}.pdf"
+
+
+def _prune_mineru_cache(cache_dir: Path) -> None:
+    files = sorted(cache_dir.glob("*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for old in files[MINERU_CACHE_KEEP:]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+
+def compress_pdf_for_mineru(src: Path, dpi: int = 200) -> Path | None:
+    """用 Ghostscript 把扫描图的分辨率降到 dpi（默认 200 DPI）。
+
+    MinerU 的视觉模型本身会把页面缩到 ~1000px 长边，300 DPI 原图上传纯属浪费：
+    200 MB / 305 页的书能压到 63 MB，识别质量看不出差别。
+    结果缓存在 _工具/.mineru_cache/，同一本书重跑不压第二次。
+    返回可直接用于分块上传的 PDF 路径（失败/收益不足返回 None）。
+    """
+    gs = _find_gs()
+    if not gs or dpi <= 0:
+        print("[MinerU] 没找到 Ghostscript，跳过降采样（上传可能较慢）")
+        return None
+    dst = _mineru_cache_path(src, dpi)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists() and dst.stat().st_size > 0:
+        print(
+            f"[MinerU] 复用已有的 {dpi} DPI 缓存：{dst.name}"
+            f"（{dst.stat().st_size/2**20:.1f} MB）"
+        )
+        _prune_mineru_cache(dst.parent)
+        return dst
+    cmd = [
+        gs,
+        "-q",
+        "-dBATCH",
+        "-dNOPAUSE",
+        "-dSAFER",
+        "-sDEVICE=pdfwrite",
+        "-dCompatibilityLevel=1.5",
+        "-dPDFSETTINGS=/ebook",
+        f"-dColorImageResolution={dpi}",
+        f"-dGrayImageResolution={dpi}",
+        "-dMonoImageResolution=600",
+        "-dColorImageDownsampleThreshold=1.0",
+        "-dGrayImageDownsampleThreshold=1.0",
+        "-dMonoImageDownsampleThreshold=1.0",
+        "-dDetectDuplicateImages=true",
+        "-dAutoRotatePages=/None",
+        f"-sOutputFile={dst}",
+        str(src),
+    ]
+    print(f"[MinerU] 先用 Ghostscript 把扫描页降到 {dpi} DPI（几分钟，只降体积不降识别精度）...")
+    t0 = time.time()
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=7200)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[MinerU] 降采样失败（{exc}），改用原文件上传")
+        dst.unlink(missing_ok=True)
+        return None
+    detail = (proc.stderr or proc.stdout or "").strip()
+    if proc.returncode != 0 or not dst.exists():
+        print(f"[MinerU] 降采样失败（gs 退出码 {proc.returncode}），改用原文件上传")
+        if detail:
+            print(f"    {detail[:300]}")
+        dst.unlink(missing_ok=True)
+        return None
+    before, after = src.stat().st_size, dst.stat().st_size
+    if after >= before * 0.9:
+        print(
+            f"[MinerU] 降采样收益不足（{before/2**20:.1f} → {after/2**20:.1f} MB），改用原文件"
+        )
+        dst.unlink(missing_ok=True)
+        return None
+    print(
+        f"[MinerU] 降采样完成：{before/2**20:.1f} MB → {after/2**20:.1f} MB"
+        f"（{time.time() - t0:.0f} 秒，已缓存供重跑使用）"
+    )
+    _prune_mineru_cache(dst.parent)
+    return dst
+
+
+def _write_pdf_slice(reader, start: int, end: int, out: Path) -> int:
+    """把第 start-end 页（1 起、含端点）写成一份 PDF，返回字节数。"""
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    for i in range(start - 1, end):
+        writer.add_page(reader.pages[i])
+    with out.open("wb") as fh:
+        writer.write(fh)
+    return out.stat().st_size
+
+
+def pack_pdf_chunks(
+    reader,
+    start: int,
+    end: int,
+    chunk_pages: int,
+    chunk_bytes: int,
+    tmpdir: Path,
+    tag: str = "part",
+    acc: list | None = None,
+):
+    """把第 start-end 页切成若干份，同时满足页数与体积上限。
+
+    单份超过 chunk_bytes 时对半再切（二分），保证每一份都能在
+    mineru-open-api 的上传超时窗口内传完。返回 [(起页, 止页, 路径, 字节数)]。
+    """
+    acc = [] if acc is None else acc
+    pages = max(1, min(chunk_pages, MINERU_MAX_PAGES, end - start + 1))
+    lo = start
+    while lo <= end:
+        hi = min(lo + pages - 1, end)
+        out = tmpdir / f"{tag}-{lo:04d}-{hi:04d}.pdf"
+        size = _write_pdf_slice(reader, lo, hi, out)
+        if chunk_bytes and size > chunk_bytes and hi > lo:
+            mid = (lo + hi) // 2
+            out.unlink(missing_ok=True)
+            pack_pdf_chunks(reader, lo, mid, chunk_pages, chunk_bytes, tmpdir, tag, acc)
+            lo = mid + 1
+            continue
+        if size > MINERU_MAX_MB * 1024 * 1024:
+            print(
+                f"    [警告] 第 {lo}-{hi} 页仍有 {size/2**20:.1f} MB，"
+                "超过 MinerU 单文件 200MB 限制，可能上传失败"
+            )
+        acc.append((lo, hi, out, size))
+        lo = hi + 1
+    return acc
+
+
+def split_pdf_for_mineru(
+    src: Path, chunk_pages: int, tmpdir: Path, chunk_bytes: int = 0
+):
+    """把 PDF 按「≤chunk_pages 页且 ≤chunk_bytes」切成小文件。"""
+    from pypdf import PdfReader
 
     reader = PdfReader(str(src))
     total = len(reader.pages)
-    chunks = []
-    for start in range(0, total, chunk_pages):
-        end = min(start + chunk_pages, total)
-        writer = PdfWriter()
-        for i in range(start, end):
-            writer.add_page(reader.pages[i])
-        out = tmpdir / f"part-{start+1:04d}-{end:04d}.pdf"
-        with out.open("wb") as fh:
-            writer.write(fh)
-        chunks.append((start + 1, end, out))
+    chunks = pack_pdf_chunks(reader, 1, total, chunk_pages, chunk_bytes, tmpdir)
     return chunks, total
 
 
@@ -398,12 +462,15 @@ def run_mineru_extract(
     language: str,
     model: str,
     timeout: int,
+    max_attempts: int = 3,
 ) -> None:
     """调用 mineru-open-api extract 解析一份 PDF（自动上传/轮询/下载）。
 
-    网络不稳定时自动重试最多 3 次；Token 无效/额度问题不重试。
+    网络不稳定时自动重试最多 max_attempts 次；Token 无效/额度问题不重试；
+    上传超时（文件太大/上行太慢）抛 MineruUploadTimeout，由调用方把这一份切小再传。
     """
-    max_attempts = 3
+    upload_timeout = False
+    detail = ""
     for attempt in range(1, max_attempts + 1):
         cmd = [
             cli,
@@ -436,26 +503,40 @@ def run_mineru_extract(
                 errors="replace",
                 timeout=timeout + 60,
             )
+            if proc.returncode == 0:
+                return
+            detail = (proc.stderr or proc.stdout or "无输出").strip()
+        except subprocess.TimeoutExpired:
+            detail = f"本地等待超过 {timeout + 60} 秒（任务可能还在云端排队）"
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"MinerU 启动失败：{exc}") from exc
-        if proc.returncode == 0:
-            return
 
-        detail = (proc.stderr or proc.stdout or "无输出").strip()
         # 鉴权/额度类错误不重试
         if any(k in detail for k in ("401", "A0202", "user authenticate failed")):
-            raise RuntimeError(
+            raise MineruAuthError(
                 f"MinerU 解析失败（{chunk.name}）：Token 无效或当日额度受限\n{detail[:800]}"
             )
+        low = detail.lower()
+        upload_timeout = "upload" in low and any(m in low for m in TIMEOUT_MARKERS)
+        if upload_timeout and attempt >= 2:
+            break  # 同样大小再传也没用，交给上层切小
         if attempt < max_attempts:
             wait = 20 * attempt
             print(
-                f"    第 {attempt} 次失败，{wait} 秒后自动重试...\n"
+                f"    第 {attempt} 次失败"
+                f"{'（上传超时）' if upload_timeout else ''}，{wait} 秒后自动重试...\n"
                 f"    原因摘要：{detail[:400]}"
             )
             time.sleep(wait)
-        else:
-            raise RuntimeError(f"MinerU 解析失败（{chunk.name}）：\n{detail[:1500]}")
+            continue
+        break
+
+    if upload_timeout:
+        raise MineruUploadTimeout(
+            f"MinerU 上传超时（{chunk.name}，"
+            f"{chunk.stat().st_size / 2**20:.1f} MB）：\n{detail[:600]}"
+        )
+    raise RuntimeError(f"MinerU 解析失败（{chunk.name}）：\n{detail[:1500]}"[:3000])
 
 
 def mineru_ocr_pdf(
@@ -467,37 +548,86 @@ def mineru_ocr_pdf(
     model: str,
     dry_run: bool,
     images_target: Path | None = None,
+    chunk_mb: int = 25,
+    dpi: int = 200,
 ) -> str:
     """把扫描版 PDF 分块上传 MinerU 云端识别，返回带页码注释的全文。"""
+    from pypdf import PdfReader
+
     cli = find_mineru_cli(cli_arg)
     token = get_mineru_token(token)
+    cap_bytes = max(0, chunk_mb) * 1024 * 1024
     print(f"[MinerU] 工具：{cli}")
-    print(f"[MinerU] 每日免费额度 1000 页，本任务按 {chunk_pages} 页/份分块上传")
+    print(
+        f"[MinerU] 每日免费额度 1000 页，本任务按 {chunk_pages} 页/份"
+        + (f"、≤{chunk_mb} MB/份" if cap_bytes else "")
+        + "分块上传"
+    )
 
     with tempfile.TemporaryDirectory(prefix="mineru_") as tmp:
         tmpdir = Path(tmp)
-        chunks, total = split_pdf_for_mineru(path, chunk_pages, tmpdir)
+        src = path
+        reader = PdfReader(str(src))
+        total = len(reader.pages)
+        # 扫描书常见：页数没超但单份几百 MB，上传必超时 —— 先降采样再分块
+        if cap_bytes and dpi:
+            per_page = src.stat().st_size / max(1, total)
+            est = per_page * min(chunk_pages, MINERU_MAX_PAGES, total)
+            if est > cap_bytes:
+                print(
+                    f"[MinerU] 平均每页 {per_page/2**20:.2f} MB，"
+                    f"单份约 {est/2**20:.0f} MB，直接上传容易超时"
+                )
+                downscaled = compress_pdf_for_mineru(src, dpi)
+                if downscaled is not None:
+                    src = downscaled
+                    reader = PdfReader(str(src))
+                    total = len(reader.pages)
+        chunks = pack_pdf_chunks(reader, 1, total, chunk_pages, cap_bytes, tmpdir)
         print(f"[MinerU] 全书 {total} 页 → {len(chunks)} 份：")
-        for start, end, c in chunks:
-            print(
-                f"  - 第 {start}-{end} 页"
-                f"（{c.stat().st_size / 1024 / 1024:.1f} MB）"
-            )
+        for start, end, c, size in chunks:
+            print(f"  - 第 {start}-{end} 页（{size / 2**20:.1f} MB）")
         if dry_run:
             print("[MinerU] 试运行模式：以上只是分块计划，未上传、未消耗额度。")
             return ""
 
-        merged = []
-        for idx, (start, end, c) in enumerate(chunks, 1):
-            out_dir = tmpdir / f"out-{start:04d}"
+        results: dict[int, str] = {}
+        tasks = deque(chunks)
+        parsed = 0
+        while tasks:
+            start, end, c, size = tasks.popleft()
+            out_dir = tmpdir / f"out-{start:04d}-{end:04d}"
             print(
-                f"[MinerU] 第 {idx}/{len(chunks)} 份"
-                f"（原书第 {start}-{end} 页）上传解析中，"
+                f"[MinerU] 上传解析 原书第 {start}-{end} 页"
+                f"（{size/2**20:.1f} MB，已完 {parsed}/{total} 页），"
                 "约 2-8 分钟，请耐心等待..."
             )
-            run_mineru_extract(
-                cli, c, out_dir, token, language, model, timeout=1800
-            )
+            try:
+                run_mineru_extract(
+                    cli, c, out_dir, token, language, model, timeout=1800
+                )
+            except MineruUploadTimeout:
+                if end - start < 1 or not cap_bytes:
+                    raise
+                new_cap = max(4 * 1024 * 1024, size // 2)
+                print(
+                    f"    上传超时 → 把第 {start}-{end} 页再切小"
+                    f"（≤{new_cap/2**20:.0f} MB）重传..."
+                )
+                sub: list = []
+                pack_pdf_chunks(
+                    reader,
+                    start,
+                    end,
+                    max(1, (end - start + 1) // 2),
+                    new_cap,
+                    tmpdir,
+                    tag=f"retry{start:04d}",
+                    acc=sub,
+                )
+                c.unlink(missing_ok=True)
+                tasks.extendleft(reversed(sub))
+                continue
             content = collect_markdown(out_dir)
             if images_target is not None:
                 src_img = out_dir / "images"
@@ -511,9 +641,10 @@ def mineru_ocr_pdf(
                             copied += 1
                     if copied:
                         print(f"    图片已保留：{copied} 张 → {dst_img}")
-            merged.append(f"<!-- 原书第 {start}-{end} 页 -->\n\n{content}")
+            results[start] = f"<!-- 原书第 {start}-{end} 页 -->\n\n{content}"
+            parsed += end - start + 1
             print(f"    完成：{len(content):,} 字符")
-        return "\n\n---\n\n".join(merged)
+        return "\n\n---\n\n".join(results[k] for k in sorted(results))
 
 
 # ---------- 章节与分块 ----------
@@ -620,11 +751,13 @@ BACK_MATTER_KEYWORDS_ZH = [
     "习题答案",
     "练习答案",
     "答案",
-    "附录",
     "索引",
     "参考文献",
     "词汇表",
     "附表",
+    "术语表",
+    "译后记",
+    "译 后 记",
 ]
 BACK_MATTER_KEYWORDS_ES = [
     "respuestas a las preguntas",
@@ -1076,24 +1209,55 @@ def _backtrack_opener(lines, start_line: int, prev_line: int, scan_end: int):
     return None
 
 
+# 标题前缀（去噪用）：正文章标题常带「第N章 / N / N. / N、」前缀（MinerU 有时只认出编号）
+_HEAD_PREFIX_RE = re.compile(
+    r"^(?:第\s*[0-9零〇一二三四五六七八九十百千万]+\s*[章节篇部讲课]"
+    r"|chapter\s*[0-9零〇一二三四五六七八九十]+"
+    r"|[0-9]{1,3}\s*[.、．]?\s*)",
+    re.I,
+)
+
+
+def _head_core(title: str) -> str:
+    """标题归一 + 去掉「第N章 / N / N.」编号前缀，用于目录名↔正文标题比对。"""
+    t = (title or "").strip()
+    t = _HEAD_PREFIX_RE.sub("", t, count=1)
+    return _norm_title(t)
+
+
 def _find_title_anchor(titles, tn: str, prev_line: int):
-    """在正文纯标题行中找与目录章名匹配的一行（先精确、后前缀），返回行号或 None。"""
+    """在正文纯标题行中找与目录章名匹配的一行，返回行号或 None。
+
+    比对先整体精确，再「去编号前缀后精确/双向前缀」：
+    正文标题常是「# 4 货币系统：…」（多个编号）或「# 开放的经济」（丢了「第N章」），
+    与目录名「货币系统：…」只有前缀之差。候选必须在该章第一个锚点之后（prev_line）。"""
     tn_norm = _norm_title(tn)
     if not tn_norm or len(tn_norm) < 2:
         return None
-    exact = [
-        i for i, t in titles if i > prev_line and _norm_title(t) == tn_norm
-    ]
+    cands = [(i, t) for i, t in titles if i > prev_line]
+    exact = [i for i, t in cands if _norm_title(t) == tn_norm]
     if exact:
         return exact[-1]
-    if len(tn_norm) >= 10:
+    # 去编号前缀后比对：正文「13 重访开放经济: …」↔ 目录「重访开放经济：…」
+    loose = [
+        (i, _head_core(t))
+        for i, t in cands
+        if _head_core(t) and _head_core(t) == tn_norm
+    ]
+    if loose:
+        return loose[-1][0]
+    if len(tn_norm) >= 8:
         pref = [
-            i
-            for i, t in titles
-            if i > prev_line and _norm_title(t).startswith(tn_norm)
+            (i, _head_core(t))
+            for i, t in cands
+            if _head_core(t)
+            and (
+                _head_core(t).startswith(tn_norm)
+                or (len(_head_core(t)) >= 8 and tn_norm.startswith(_head_core(t)))
+            )
         ]
         if pref:
-            return pref[-1]
+            return pref[-1][0]
     return None
 
 
@@ -1245,6 +1409,372 @@ def build_chapter_plan(text: str, opener_pattern: str = ""):
     }
 
 
+def _int_to_cn(n: int) -> str:
+    """1-99 → 中文数字（用来把章号还原成「第十课」这类书名里的写法）。"""
+    digits = "零一二三四五六七八九"
+    if not isinstance(n, int) or n < 0 or n > 99:
+        return str(n)
+    if n < 10:
+        return digits[n]
+    tens, ones = divmod(n, 10)
+    s = "十" if tens == 1 else digits[tens] + "十"
+    return s + (digits[ones] if ones else "")
+
+
+def _unit_number(title: str):
+    """从标题里抽章号：UNIDAD 8 / UNIDAD8 / 第八课 / 第8课 都能认。"""
+    t = title or ""
+    for pat in (r"unidad\s*([0-9]{1,3})", r"第\s*([0-9]{1,3})\s*课", r"([0-9]{1,3})\s*课"):
+        m = re.search(pat, t, re.I)
+        if m:
+            return int(m.group(1))
+    m = re.search(r"第\s*([零〇一二三四五六七八九十百]{1,4})\s*课", t)
+    if m:
+        return _cn_to_int(m.group(1))
+    return None
+
+
+def _line_offsets(lines) -> list:
+    offs, off = [], 0
+    for ln in lines:
+        offs.append(off)
+        off += len(ln) + 1
+    return offs
+
+
+CN_NUM = r"[0-9零〇一二三四五六七八九十百两]+"
+
+# 看着就像「章名」的行（中西英意都认）：章标题被当成正文行输出时靠这个兑回
+CHAPTERISH_RE = re.compile(
+    r"(?:\b(?:unidad|unidade|chapter|cap[íi]tulo|capitolo|lesson|lecci[óo]n|"
+    r"unit|parte|part|module|m[óo]dulo|sezione|lezione)\b"
+    rf"|第\s*{CN_NUM}\s*[课章节讲]"
+    rf"|第\s*{CN_NUM}\s*单元)",
+    re.I,
+)
+
+
+def _norm_heading(s: str) -> str:
+    """把标题行归一化成「小节名」：去 # 标记、编号前缀、图片、圈号，词序无关。
+
+    中西双语书的同一小节会被识成「课文 TEXTOS」或「TEXTOS 课文」，
+    按词排序归一后两者是同一个名字，统计频率才不会漏。
+    """
+    t = re.sub(r"^#{1,6}\s*", "", (s or "").strip())
+    t = re.sub(r"<img[^>]*>", " ", t, flags=re.I)
+    t = re.sub(r"[①-⑳▢□●○■◆▲△\u4e00\u7530]", " ", t)  # 装饰字母等 OCR 垃圾
+    t = re.sub(r"^(?:[IVXLCDM]{1,7}|[0-9]{1,3})\s*[.、．:：]\s*", "", t, flags=re.I)
+    words = sorted(w for w in re.split(r"[^0-9A-Za-z\u4e00-\u9fffÀ-ÿ]+", t) if w)
+    return "|".join(words)[:36].upper()
+
+
+def _looks_like_chapter_title(t: str) -> bool:
+    return bool(t) and len(t) <= 60 and bool(CHAPTERISH_RE.search(t))
+
+
+def _chapter_label(raws) -> str:
+    """从各章标题里抽出章量词（UNIDAD / Chapter / …），抽不到返回空串。"""
+    seen = {}
+    for t in raws:
+        if not _looks_like_chapter_title(t):
+            continue
+        m = re.search(r"[A-Za-zÀ-ÿ]{3,12}", t)
+        if m:
+            w = m.group(0)
+            seen[w] = seen.get(w, 0) + 1
+    return max(seen, key=lambda w: seen[w]) if seen else ""
+
+
+def _plan_from_starts(text: str, starts, back_line):
+    """由「各章起点行号 + 书后部分起点行号」生成与 build_chapter_plan 同构的计划。"""
+    lines = text.split("\n")
+    offsets = _line_offsets(lines)
+    raw = [_clean_anchor_title(lines[i]) for i in starts]
+    nums = [_unit_number(t) for t in raw]
+    ok = (
+        all(n is not None for n in nums)
+        and nums == sorted(nums)
+        and len(set(nums)) == len(nums)
+    )
+    label = _chapter_label(raw)
+    cn_lesson = any(re.search(rf"第\s*{CN_NUM}\s*课", t) for t in raw)
+    if not label and cn_lesson:
+        label = "UNIDAD"
+    bounds = []
+    for seq, (line_idx, t) in enumerate(zip(starts, raw), start=1):
+        num = nums[seq - 1] if ok and nums[seq - 1] else seq
+        if label:
+            title = f"{label} {num}" + (f" 第{_int_to_cn(num)}课" if cn_lesson else "")
+        else:
+            title = t or f"{num}"
+        bounds.append((num, title, offsets[line_idx]))
+
+    back_matter = None
+    if back_line is not None and back_line < len(lines) - 2:
+        tail = "\n".join(lines[back_line:]).strip()
+        if len(tail) > 50:
+            back_matter = (
+                offsets[back_line],
+                _clean_anchor_title(lines[back_line]) or "书后部分（答案/附录）",
+            )
+    front_matter = None
+    if bounds and bounds[0][2] > 1200:
+        front_matter = (bounds[0][2], "书前部分（前言/目录/语音表）")
+
+    end_pos = back_matter[0] if back_matter else len(text)
+    for i, (num, title, pos) in enumerate(bounds):
+        nxt = bounds[i + 1][2] if i + 1 < len(bounds) else end_pos
+        if nxt - pos < 1200:
+            print(
+                f"[警告] {title} 只占 {nxt - pos} 字，章界可能有误，"
+                "请核对收尾小节是否每章只出现一次"
+            )
+    return {
+        "bounds": bounds,
+        "toc_count": len(bounds),
+        "missing": [],
+        "back_matter": back_matter,
+        "front_matter": front_matter,
+    }
+
+
+def build_chapter_plan_by_end_anchor(
+    text: str, end_pattern: str, title_pattern: str = "", start_pattern: str = ""
+):
+    """按「每一章都以同一个固定小节收尾」定位章界。
+
+    适用于章标题用了装饰字体、被 OCR 整批打掉的教材：
+    如《某外语教材》16 个 UNIDAD 标题只认出 7 个，
+    但每课末尾都有「作业 (Trabajos de casa)」，16 次一次不差。
+
+    规则：每个收尾行之后的第一个章标题行（# 开头，或 --chapter-title-pattern 命中的行）
+    就是下一章起点；最后一个收尾行之后的第一个标题即书后部分（总词汇表等）。
+    返回与 build_chapter_plan 同构的 dict（可多一个 front_matter），识别不到返回 None。
+    """
+    try:
+        end_re = re.compile(end_pattern, re.I)
+        title_re = re.compile(title_pattern, re.I) if title_pattern else None
+        start_re = (
+            re.compile(start_pattern, re.I)
+            if start_pattern
+            else re.compile(r"^\s*#{1,6}\s*[^\n#]{0,12}(?:课文\s*)?TEXTOS", re.I)
+        )
+    except re.error as exc:
+        print(f"[章界识别] 正则无效（{exc}），改用通用章节识别。")
+        return None
+
+    lines = text.split("\n")
+    offsets = []
+    off = 0
+    for ln in lines:
+        offsets.append(off)
+        off += len(ln) + 1
+
+    def is_heading(s: str) -> bool:
+        return s.lstrip().startswith("#")
+
+    def skipable(s: str) -> bool:
+        return not s.strip() or s.lstrip().startswith(("<", "![", "|", "["))
+
+    def next_unit_head(after: int, limit: int | None = None, prefer=None):
+        """收尾行之后的下一个章起点行号。
+
+        先用 prefer（--chapter-title-pattern 给的「章标题特征」），找不到的话
+        才退而取窗口里第一个 # 标题（很多书章标题被 OCR 打掉，只剩第一个小节标题）。
+        """
+        stop = limit if limit is not None else len(lines)
+        first_head = None
+        for i in range(after + 1, stop):
+            s = lines[i]
+            if skipable(s):
+                continue
+            if prefer is not None and prefer.match(s):
+                return i
+            if first_head is None and is_heading(s):
+                first_head = i
+        return first_head
+
+    anchors = [
+        i for i, ln in enumerate(lines) if end_re.search(ln) and not skipable(ln)
+    ]
+    if len(anchors) < 2:
+        print(
+            f"[章界识别] 只找到 {len(anchors)} 个收尾锚点，不足以定位章界，改用通用章节识别。"
+        )
+        return None
+
+    heads = [
+        i
+        for i, ln in enumerate(lines)
+        if (is_heading(ln) or (title_re and title_re.match(ln))) and not skipable(ln)
+    ]
+    before = [i for i in heads if i < anchors[0] and start_re.search(lines[i])]
+    start_first = before[0] if before else (heads[0] if heads and heads[0] < anchors[0] else None)
+    if start_first is None:
+        print("[章界识别] 没定位到第一章的起点，改用通用章节识别。")
+        return None
+
+    starts = [start_first]
+    for k in range(len(anchors) - 1):
+        nxt = next_unit_head(anchors[k], anchors[k + 1], title_re)
+        if nxt is None:
+            print(
+                f"[章界识别] 第 {k + 1} 章的收尾行之后找不到章起点（窗口 {anchors[k]+1}-{anchors[k+1]+1}），已跳过"
+            )
+            continue
+        if nxt <= starts[-1]:
+            continue
+        starts.append(nxt)
+    back_line = next_unit_head(anchors[-1])
+
+    plan = _plan_from_starts(text, starts, back_line)
+    print(
+        f"[章界识别] 收尾锚点 {len(anchors)} 个 → 定位到 {len(plan['bounds'])} 章"
+        f"（第一章从行 {starts[0] + 1} 开始）"
+    )
+    return plan
+
+
+ENUM_COLON_RE = re.compile(r"^(?:[IVXLCDM]{1,7}|[0-9]{1,3})\s*[.、．]\s*\S")
+
+
+def _is_wide_head(s: str) -> bool:
+    """统计「每章固定小节」用的宽口径：# 标题、章名行、带编号又以冒号结尾的小节行。
+
+    「XIV. 作业 (Trabajos de casa):」这种每章最后一节常常没被识成 # 标题，
+    但正因为它在每章最后，宽口径才能把它挑出来当收尾锚点。
+    """
+    t = s.strip()
+    if t.startswith("#"):
+        return True
+    if len(t) <= 30 and CHAPTERISH_RE.search(t):
+        return True
+    return len(t) <= 60 and t.endswith((":", "：")) and bool(ENUM_COLON_RE.match(t))
+
+
+def _is_narrow_head(s: str) -> bool:
+    """定章界用的严口径：只认 # 标题和章名行，免得把作业里的题号当成新章开头。"""
+    t = s.strip()
+    if t.startswith("#"):
+        return True
+    return len(t) <= 30 and bool(CHAPTERISH_RE.search(t))
+
+
+def discover_chapter_plan(text: str, min_units: int = 4, min_gap: int = 2500):
+    """一行参数都不给，自己从正文里把章界挖出来。
+
+    ① 宽口径统计小节标题（归一化后），只留「每章出现且只出现一次」的：
+       相邻两次至少隔 min_gap 字，且间隔均匀（每章长度相近）；
+    ② 章数 k = 能有两个以上小节共享的最大出现次数（真每章一节不止一种，次数都 = k）；
+    ③ 其中在每章里位置最靠后的那个 = 收尾锚点（如「作业 (Trabajos de casa)」）；
+    ④ 章起点 = 严口径标题里，各窗口开头最常见的那个小节名（如「课文 TEXTOS」），
+       没有就取窗口里第一个严口径标题。
+    返回与 build_chapter_plan 同构的 dict；挖不出来返回 None（交回通用识别）。
+    """
+    lines = text.split("\n")
+    offsets = _line_offsets(lines)
+
+    def skipable(s: str) -> bool:
+        return not s.strip() or s.lstrip().startswith(("<", "![", "|", "["))
+
+    wide = [i for i, ln in enumerate(lines) if _is_wide_head(ln) and not skipable(ln)]
+    heads = [i for i, ln in enumerate(lines) if _is_narrow_head(ln) and not skipable(ln)]
+    by_name: dict = {}
+    for i in wide:
+        key = _norm_heading(lines[i])
+        if len(key) >= 2:
+            by_name.setdefault(key, []).append(i)
+    good: dict = {}
+    for key, idxs in by_name.items():
+        if len(idxs) < min_units:
+            continue
+        gaps = [offsets[idxs[j + 1]] - offsets[idxs[j]] for j in range(len(idxs) - 1)]
+        mean = sum(gaps) / len(gaps)
+        # 真「每章一次」的小节：间隔均匀（每章长度相近）且每段都够长；
+        # 只重复了几次的习题标题往往堆在书后半部，间隔会明显不均。
+        if min(gaps) >= max(min_gap, 0.45 * mean):
+            good[key] = idxs
+    if len(good) < 2:
+        return None
+    counts: dict = {}
+    for idxs in good.values():
+        counts[len(idxs)] = counts.get(len(idxs), 0) + 1
+    # 章数 = 能有至少两个同名小节共享的出现次数里最大的那个
+    # （真的每章一节不会只有一种，且次数等于章数）
+    k = max((c for c, n in counts.items() if n >= 2), default=0)
+    sigs = {key: idxs for key, idxs in good.items() if len(idxs) == k}
+    if k < min_units or len(sigs) < 2:
+        return None
+    best_key, best_score = None, -1
+    for key, idxs in sigs.items():
+        score = sum(
+            1 for j in range(k) if idxs[j] == max(v[j] for v in sigs.values())
+        )
+        if score > best_score:
+            best_key, best_score = key, score
+    if best_score < k * 0.6:
+        return None
+    anchor_idx = sigs[best_key]
+
+    # 章起点特征：只看每个窗口开头 3 个（严口径）标题，要求通常就是第一个
+    win_pos: dict = {}
+    for j in range(len(anchor_idx) - 1):
+        lo, hi = anchor_idx[j], anchor_idx[j + 1]
+        firsts = [h for h in heads if lo < h < hi][:3]
+        for n, h in enumerate(firsts):
+            win_pos.setdefault(_norm_heading(lines[h]), []).append(n)
+    windows = max(1, len(anchor_idx) - 1)
+    start_names = {
+        name
+        for name, pos in win_pos.items()
+        if len(pos) >= max(2, int(windows * 0.4))
+        and (sorted(pos)[len(pos) // 2] <= 1 or len(pos) >= windows * 0.6)
+    }
+    print(
+        f"[自动章界] 每章收尾小节：「{best_key}」{k} 次 → 全书 {k} 章"
+        + (f"；章起点特征：{'、'.join(sorted(start_names))}" if start_names else "")
+    )
+
+    def window_start(lo: int, hi: int):
+        cand = [h for h in heads if lo < h < hi]
+        if not cand:
+            return None
+        looks = [
+            h
+            for h in cand[:10]
+            if _norm_heading(lines[h]) in start_names
+            or (len(lines[h].strip()) <= 40 and CHAPTERISH_RE.search(lines[h]))
+        ]
+        return looks[0] if looks else cand[0]
+
+    pre = [h for h in heads if h < anchor_idx[0]]
+    start_first = None
+    for h in reversed(pre):
+        if _norm_heading(lines[h]) in start_names:
+            start_first = h
+            break
+    if start_first is not None:
+        # 第一章的章名行常常就在它上面（如「## UNIDAD 第一课」），把起点抬过去
+        above = [h for h in pre if h < start_first and CHAPTERISH_RE.search(lines[h])]
+        if above and start_first - above[-1] <= 30:
+            start_first = above[-1]
+    else:
+        start_first = window_start(0, anchor_idx[0])
+    if start_first is None:
+        return None
+
+    starts = [start_first]
+    for j in range(len(anchor_idx) - 1):
+        nxt = window_start(anchor_idx[j], anchor_idx[j + 1])
+        if nxt is None or nxt <= starts[-1]:
+            continue
+        starts.append(nxt)
+    if len(starts) < 2:
+        return None
+    tail_head = [h for h in heads if h > anchor_idx[-1]]
+    return _plan_from_starts(text, starts, tail_head[0] if tail_head else None)
+
+
 def _strip_leading_heading(body: str, title: str) -> str:
     """去掉正文开头的章节标题行，避免文件里重复出现两次标题。"""
     m = HEADING_LINE_RE.match(body)
@@ -1308,7 +1838,7 @@ def make_outline(
     for i, (num, title, body, _pos) in enumerate(units, start=1):
         files = chapter_files.get(i, [])
         links = "、".join(f"[[{f}]]" for f in files) or "—"
-        num_cell = f"第 {num} 章" if num else f"第 {i} 单元"
+        num_cell = f"第 {num} 章" if num else "—"
         title_cell = (title or "—").replace("|", "\\|")
         pos_line = text.count("\n", 0, _pos) + 1 if _pos is not None else "—"
         lines.append(
@@ -1318,9 +1848,9 @@ def make_outline(
         "\n## ✅ 学习进度（勾选即记录）\n\n",
     ]
     for i, (num, title, body, _pos) in enumerate(units, start=1):
-        num_cell = f"第 {num} 章" if num else f"第 {i} 单元"
+        num_cell = f"第 {num} 章 " if num else ""
         title_cell = (title or "—").replace("|", "\\|")
-        lines.append(f"- [ ] {num_cell} {title_cell}\n")
+        lines.append(f"- [ ] {num_cell}{title_cell}\n")
     lines += [
         "\n> 📊 进度：0 / ",
         str(len(units)),
@@ -1351,6 +1881,7 @@ def process_file(src: Path, out_root: Path, max_chars: int, overlap: int, args):
         book_name = safe_name(args.book_name or src.stem, 60)
     book_dir = out_root / book_id
     book_dir.mkdir(parents=True, exist_ok=True)
+    set_book_backup_root(book_id)
 
     if is_resplit:
         engine = "resplit"
@@ -1362,7 +1893,10 @@ def process_file(src: Path, out_root: Path, max_chars: int, overlap: int, args):
         print("[重切分] 从已有解析全文重新按标题切分（不消耗 MinerU 额度）")
     elif args.ocr == "mineru":
         if src.suffix.lower() != ".pdf":
-            print("[跳过] MinerU 模式目前只支持 PDF 教材。")
+            print(
+                "[跳过] 只支持 PDF（全走 MinerU 云端识别）：\n"
+                "       EPUB / Word 请先转成 PDF；已有 00-MinerU解析全文.md 可直接重切分。"
+            )
             return
         engine = "mineru"
         print(f"[MinerU] 用 MinerU 云端解析 {src.name}（公式转 LaTeX）...")
@@ -1374,6 +1908,8 @@ def process_file(src: Path, out_root: Path, max_chars: int, overlap: int, args):
             language=args.mineru_language,
             model=args.mineru_model,
             dry_run=args.mineru_dry_run,
+            chunk_mb=args.mineru_chunk_mb,
+            dpi=args.mineru_dpi,
             images_target=None if args.no_keep_images else book_dir,
         )
         if args.mineru_dry_run:
@@ -1386,15 +1922,12 @@ def process_file(src: Path, out_root: Path, max_chars: int, overlap: int, args):
             print(f"[跳过] MinerU 后仍提取不到内容（{total_chars} 字）。")
             return
     else:
-        text = extract_text(src)
-        total_chars = len(text)
-        if total_chars < 50:
-            print(
-                f"[跳过] {src.name} 提取到的文字太少（{total_chars} 字）。\n"
-                "       这通常是【扫描版 PDF】（页面是图片、没有文字层）。\n"
-                "       解决办法：用 _工具/拆书-MinerU.bat（云端，公式转 LaTeX）。"
-            )
-            return
+        print(
+            f"[跳过] {src.name} 不是 PDF。\n"
+            "       只支持 PDF（全走 MinerU 云端识别，公式转 LaTeX）\n"
+            "       或 00-MinerU解析全文.md 重切分。"
+        )
+        return
 
     # 切分方式：auto 一律优先按章节标题拆分（识别不到再退回按标题/字数）
     mode = args.split_mode
@@ -1405,10 +1938,54 @@ def process_file(src: Path, out_root: Path, max_chars: int, overlap: int, args):
     chunk_no = 0
     units = None
     if mode == "chapter":
-        plan_info = build_chapter_plan(text, getattr(args, "opener_pattern", ""))
+        generic = build_chapter_plan(text, getattr(args, "opener_pattern", ""))
+        plan_info = generic
+        how = "通用标题识别"
+        end_pat = (getattr(args, "chapter_end_pattern", "") or "auto").strip()
+        title_pat = getattr(args, "chapter_title_pattern", "")
+        start_pat = getattr(args, "chapter_start_pattern", "")
+        explicit = end_pat not in ("", "auto", "off", "none", "no")
+        if end_pat.lower() in ("off", "none", "no"):
+            end_pat = ""
+        if end_pat == "auto":
+            hint = f"{args.book_name} {src.stem} {src.parent.name}"
+            for kw, ep, tp in END_ANCHOR_PRESETS:
+                if kw.lower() in hint.lower():
+                    end_pat, title_pat = ep, (title_pat or tp)
+                    print(
+                        f"[章界识别] 命中预设《{kw}》：按每章收尾小节定位章界"
+                        f"（锚点正则：{ep}）"
+                    )
+                    break
+            else:
+                end_pat = ""
+        cand = None
+        if end_pat:
+            cand = build_chapter_plan_by_end_anchor(text, end_pat, title_pat, start_pat)
+        elif args.chapter_end_pattern:
+            # auto 但没命中预设：从正文里自己挖「每章固定小节」
+            cand = discover_chapter_plan(text)
+        if cand and cand.get("bounds"):
+            n_cand, n_cur = len(cand["bounds"]), len(plan_info["bounds"]) if plan_info else 0
+            # 只有通用识别明显没切好（<4 章，或章数不到对方一半多一点）才改写，
+            # 避免拿一个更细的重复小节把正常的章表拆碎
+            better = n_cand > n_cur and (
+                explicit or n_cur < 4 or n_cand >= n_cur * 2.2
+            )
+            if better:
+                plan_info, how = cand, "按每章收尾小节定位"
+                if not explicit:
+                    print(f"[章界识别] 收尾小节定位 {n_cand} 章 > 通用识别 {n_cur} 章，用前者")
+            else:
+                print(
+                    f"[章界识别] 收尾小节定位到 {n_cand} 章，不如通用识别（{n_cur} 章），"
+                    "保留通用结果"
+                )
         plan = plan_info["bounds"] if plan_info else None
         if plan:
-            print(f"[标题识别] 找到 {len(plan)} 个章节，按章节切分（一章一个文件）")
+            print(
+                f"[标题识别] {how}：找到 {len(plan)} 个章节，按章节切分（一章一个文件）"
+            )
             if plan_info.get("missing"):
                 print(
                     "[提示] 以下章节未在正文定位到："
@@ -1429,6 +2006,10 @@ def process_file(src: Path, out_root: Path, max_chars: int, overlap: int, args):
                 bm_title = back_matter[1]
                 units.append((None, bm_title, text[back_matter[0] :], back_matter[0]))
                 print(f"[提示] 检测到书后部分（{bm_title}），已保留为最后一个分块")
+            front_matter = plan_info.get("front_matter")
+            if front_matter:
+                units.insert(0, (None, front_matter[1], text[: front_matter[0]], 0))
+                print(f"[提示] 正文前的内容单独存为一个分块（{front_matter[1]}）")
         else:
             print("[提示] 未能从目录/页眉识别章节，退回按字数拆分。")
     if units is None:
@@ -1470,17 +2051,18 @@ def process_file(src: Path, out_root: Path, max_chars: int, overlap: int, args):
         atomic_write(fpath, content)
         chunks_meta.append((chunk_no, fname, title, len(piece), preview, idx))
 
-    # 旧的、本次未生成的分块文件移入备份（防残留旧碎片）
+    # 旧的、本次未生成的分块文件移入库外备份（防残留旧碎片）
     new_names = {m[1] for m in chunks_meta}
     stale = [p for p in book_dir.glob("章节*.md") if p.name not in new_names]
     if stale:
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        dest = book_dir / BACKUP_DIR_NAME / stamp / "old-chunks"
+        backup_root = book_backup_root(book_dir)
+        dest = backup_root / stamp / "old-chunks"
         dest.mkdir(parents=True, exist_ok=True)
         for p in stale:
             shutil.move(str(p), dest / p.name)
-        prune_backups(book_dir / BACKUP_DIR_NAME)
-        print(f"[整理] 旧分块 {len(stale)} 个已备份到 _备份\\{stamp}\\old-chunks")
+        prune_backups(backup_root)
+        print(f"[整理] 旧分块 {len(stale)} 个已备份到 {dest}")
 
     engine_note = {
         "text": "文字层直接提取",
@@ -1577,13 +2159,13 @@ def main():
     parser.add_argument(
         "--ocr",
         choices=["mineru"],
-        default=None,
-        help="扫描版 PDF 用 mineru=MinerU 云端解析（公式转 LaTeX，免费 1000 页/天）",
+        default="mineru",
+        help="扫描版 PDF 用 MinerU 云端解析（公式转 LaTeX，免费 1000 页/天；本仓库唯一 OCR 路径）",
     )
     parser.add_argument(
         "--mineru-token",
         default="",
-        help="MinerU Token（也可用环境变量 MINERU_TOKEN 或 设置MinerU令牌.bat 保存）",
+        help="MinerU Token（也可用环境变量 MINERU_TOKEN 或 设置MinerU令牌.sh 保存）",
     )
     parser.add_argument(
         "--mineru-cli",
@@ -1594,7 +2176,19 @@ def main():
         "--mineru-chunk-pages",
         type=int,
         default=200,
-        help="每份上传的最大页数（MinerU 单文件限制，默认 200）",
+        help="每份上传的最大页数（MinerU 单文件限制 600 页/200MB，默认 200）",
+    )
+    parser.add_argument(
+        "--mineru-chunk-mb",
+        type=int,
+        default=25,
+        help="每份上传的最大体积 MB（默认 25；上传超时就调小，0=不限体积）",
+    )
+    parser.add_argument(
+        "--mineru-dpi",
+        type=int,
+        default=200,
+        help="扫描页降采样到的 DPI（默认 200，不影响识别精度；0=不压缩直传原件）",
     )
     parser.add_argument(
         "--mineru-language",
@@ -1630,6 +2224,27 @@ def main():
         "如意大利语教材每课都有的 'Impariamo a parlare'（可选）",
     )
     parser.add_argument(
+        "--chapter-end-pattern",
+        default="auto",
+        help="每章固定收尾小节的正则（章标题被 OCR 打掉时的可靠办法），"
+        "如 '作业\\s*\\(Trabajos de casa'；下一章从该行之后的第一个章标题/# 标题开始。"
+        "默认 auto：先按书名命中共预设，没命中就从正文自动挖掘每章固定小节；"
+        "off = 关掉只用通用标题识别",
+    )
+    parser.add_argument(
+        "--chapter-title-pattern",
+        default="",
+        help="与 --chapter-end-pattern 配合：章起点标题行的特征正则（优先于“窗口内第一个 # 标题”），"
+        "如 '^(?:#{1,6}\\s*)?(?:[A-Za-z田\\s]{0,8})?\\b(?:UNIDAD|第[0-9一二三四五六七八九十]+课$|课文\\s*TEXTOS)'"
+        "（--chapter-end-pattern auto 会自动填）",
+    )
+    parser.add_argument(
+        "--chapter-start-pattern",
+        default="",
+        help="与 --chapter-end-pattern 配合：第一章起点的正则"
+        "（默认找第一个 课文/TEXTOS 标题）",
+    )
+    parser.add_argument(
         "--no-keep-images",
         action="store_true",
         help="MinerU 模式不保留解析出的图片（默认保留到分块文件夹 images/）",
@@ -1646,7 +2261,7 @@ def main():
         files = [src]
 
     if not files:
-        print("没有找到 PDF / EPUB / DOCX 文件。")
+        print("没有找到 PDF 文件。")
         return
 
     for f in files:
@@ -1659,4 +2274,20 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (MineruUploadTimeout, MineruAuthError, RuntimeError) as exc:
+        print(f"\n[失败] {exc}")
+        print(
+            "\n常见原因与对策："
+            "\n  - 上传超时：把每份调小重跑，如 --mineru-chunk-mb 10"
+            "（上行慢就 5），或 --mineru-dpi 150；"
+            "\n    也可直接 --mineru-dry-run 先看分块计划（不耗额度）。"
+            "\n  - Token/额度：去 https://mineru.net/apiManage/token 重新复制，"
+            "再运行 _工具/设置MinerU令牌.bat。"
+            "\n  - 云端排队/网络抖动：稍后重跑同一条命令即可。"
+        )
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\n[中断] 已停止，未消耗额度的部分下次重跑即可。")
+        sys.exit(130)

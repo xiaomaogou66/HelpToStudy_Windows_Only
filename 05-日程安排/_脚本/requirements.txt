@@ -1,0 +1,8 @@
+# 同步日历脚本依赖（装到 ../../_工具/.venv 里）
+#   ../_工具\.venv\Scripts\python.exe -m pip install -r requirements.txt
+google-api-python-client>=2.100
+google-auth-oauthlib>=1.0
+# ⚠️ 必须装：本机走 http 代理（127.0.0.1:7897），
+#    httplib2 缺了 PySocks 会静默直连 → 每次请求超时 20 秒后报 TimeoutError
+PySocks>=1.7
+tzdata>=2024.1     # Windows 上 ZoneInfo 需要它（Linux 自带时区库，装了也无害）

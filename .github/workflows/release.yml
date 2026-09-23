@@ -56,3 +56,58 @@ jobs:
             (Join-Path $outDir "HelpToStudy-QuickInstall.bat") `
             --repo "$env:GITHUB_REPOSITORY" `
             --notes-file (Join-Path $outDir "release-notes.md")
+
+  # 只报告、不卡发布：CI 里没有真机桌面，但 Python 层与仓库内容能查
+  smoke:
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python 语法检查（全部 .py）
+        shell: pwsh
+        run: |
+          $bad = 0
+          Get-ChildItem -Recurse -Filter *.py -File | ForEach-Object {
+            & python -m py_compile $_.FullName
+            if ($LASTEXITCODE -ne 0) { $bad = 1; Write-Host "FAILED: $($_.FullName)" }
+          }
+          if ($bad -ne 0) { throw "有 Python 文件语法错误" }
+          Write-Host "所有 .py 语法检查通过"
+
+      - name: 日程安排层自检（离线）
+        shell: pwsh
+        run: |
+          & python "05-日程安排\_脚本\自检.py"
+          if ($LASTEXITCODE -ne 0) { throw "自检未通过（见上面 ❌）" }
+
+      - name: 启动器检查（.bat 行尾 + 关键文件存在）
+        shell: pwsh
+        run: |
+          $bats = Get-ChildItem -Recurse -Include *.bat -File
+          foreach ($f in $bats) {
+            $bytes = [IO.File]::ReadAllBytes($f.FullName)
+            $crlf = 0; $lf = 0
+            for ($i = 0; $i -lt $bytes.Length; $i++) {
+              if ($bytes[$i] -eq 10) { if ($i -gt 0 -and $bytes[$i-1] -eq 13) { $crlf++ } else { $lf++ } }
+            }
+            if ($lf -gt 0) { throw "$($f.Name) 存在裸 LF（.bat 必须 CRLF）" }
+            Write-Host "OK  $($f.Name)  CRLF=$crlf"
+          }
+          foreach ($must in @("_工具\拆书.bat", "05-日程安排\_脚本\同步日程.bat",
+                              "05-日程安排\_脚本\自检.bat", "05-日程安排\00-配置\多端同步.md")) {
+            if (-not (Test-Path -LiteralPath $must)) { throw "缺少 $must" }
+          }
+          Write-Host "关键启动器与文档齐备"
+
+      - name: 仓库内容检查（不该出现的文件）
+        shell: pwsh
+        run: |
+          $bad = @()
+          $bad += Get-ChildItem -Recurse -File -Include *.ics,*.ical |
+                  Where-Object { $_.Name -ne "课表示例.ics" }
+          $bad += Get-ChildItem -Recurse -File -Include calender-*.json,service-account*.json,token.json
+          $bad += Get-ChildItem -Recurse -Directory -Filter "20??-W*"
+          if ($bad) { $bad | ForEach-Object { Write-Host "BAD: $($_.FullName)" }; throw "仓库里出现不该包含的文件" }
+          Write-Host "OK  没有密钥 / 个人课表 / 个人日记"

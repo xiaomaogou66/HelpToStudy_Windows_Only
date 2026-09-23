@@ -1,8 +1,11 @@
 [
-  "copilot",
-  "templater-obsidian",
-  "dataview",
-  "quickadd",
   "realclaudian",
-  "excalidraw-cn"
+  "dataview",
+  "excalidraw-cn",
+  "quickadd",
+  "templater-obsidian",
+  "obsidian-latex-suite",
+  "ical",
+  "obsidian-style-settings",
+  "table-editor-obsidian"
 ]

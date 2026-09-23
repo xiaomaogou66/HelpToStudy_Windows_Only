@@ -1,0 +1,5 @@
+{
+  "folder": "05-日程安排/06-日志",
+  "template": "02-模板/日记.md",
+  "format": "GGGG-[W]WW/YYYY-MM-DD"
+}

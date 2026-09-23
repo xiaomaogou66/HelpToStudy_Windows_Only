@@ -61,7 +61,8 @@ try {
     $stage = Join-Path $buildDir "stage"
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
     # robocopy 退出码 0-7 均为成功（1 = 已复制文件）
-    & robocopy $RepoRoot $stage /E /XD .git /NFL /NDL /NJH /NJS /R:1 /W:1 | Out-Null
+    # 排除：版本库 / 虚拟环境 / 缓存 / 本地专属词表 / 构建产物
+& robocopy $RepoRoot $stage /E /XD .git .venv __pycache__ dist /XF scrub-map.local.txt /NFL /NDL /NJH /NJS /R:1 /W:1 | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "复制仓库失败（robocopy 退出码 $LASTEXITCODE）" }
     $tmpZip = Join-Path $buildDir $ZipName
     try { Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop } catch { }

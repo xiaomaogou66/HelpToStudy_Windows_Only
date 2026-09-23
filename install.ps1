@@ -138,7 +138,9 @@ if (Test-Path -LiteralPath $VaultPath) {
 Write-Step "第 1 步：创建库目录结构"
 $dirs = @(
     "00-使用指南", "01-提示词库", "02-模板", "03-学习主题", "04-教材分块",
-    "_工具", "_备份", "copilot\copilot-custom-prompts", "images"
+    "_工具", "copilot\copilot-custom-prompts", "images",
+    "05-日程安排\00-配置", "05-日程安排\_脚本", "05-日程安排\06-日志",
+    "05-日程安排\_资源\日历", "05-日程安排\_归档", ".pi\skills"
 )
 foreach ($d in $dirs) {
     New-Item -ItemType Directory -Force -Path (Join-Path $VaultPath $d) | Out-Null
@@ -147,7 +149,7 @@ Write-OK "目录结构已就绪"
 
 # ---------- 2. 复制内容 ----------
 Write-Step "第 2 步：复制模板 / 提示词 / 命令 / 配置"
-$copyDirs = @("00-使用指南", "01-提示词库", "02-模板", ".claude", "copilot", ".obsidian")
+$copyDirs = @("00-使用指南", "01-提示词库", "02-模板", "05-日程安排", ".claude", ".pi", "copilot", ".obsidian")
 foreach ($d in $copyDirs) {
     $src = Join-Path $RepoRoot $d
     if (-not (Test-Path -LiteralPath $src)) { continue }
@@ -165,6 +167,20 @@ Copy-Item -LiteralPath (Join-Path $RepoRoot "CLAUDE.md") -Destination $VaultPath
 # _工具 整目录复制：拆书脚本 + 相对路径启动器 + requirements.txt（排除虚拟环境与缓存）
 robocopy (Join-Path $RepoRoot "_工具") (Join-Path $VaultPath "_工具") /E /XD .venv __pycache__ /NFL /NDL /NJH /NJS /R:2 /W:1 | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "复制 _工具 失败（错误码 $LASTEXITCODE）" }
+# 日程安排层：任何密钥 / 令牌类文件都不带入目标库
+@("calender-*.json", "service-account*.json", "token.json", "credentials.json") | ForEach-Object {
+    Get-ChildItem -Path (Join-Path $VaultPath "05-日程安排\_脚本") -Filter $_ -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+}
+Get-ChildItem -Path (Join-Path $VaultPath "05-日程安排") -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+
+# 课表：没有真课表就先放一份示例，跑 自检 / 打卡 不会空转
+$courseIcs = Join-Path $VaultPath "05-日程安排\_资源\日历\课表-当前.ics"
+if (-not (Test-Path -LiteralPath $courseIcs)) {
+    $sample = Join-Path $RepoRoot "05-日程安排\_资源\日历\课表示例.ics"
+    if (Test-Path -LiteralPath $sample) { Copy-Item -LiteralPath $sample -Destination $courseIcs -Force }
+}
 Write-OK "内容复制完成"
 
 # ---------- 3. Python 环境 ----------
@@ -199,7 +215,7 @@ if (-not $SkipPython) {
         if ($LASTEXITCODE -ne 0) { throw "创建 Python 虚拟环境失败" }
     }
     Invoke-PipWithRetry -PipExe $venvPy -PipArgs @("-m", "pip", "install", "--disable-pip-version-check", "-q", "-r", (Join-Path $RepoRoot "requirements.txt")) -Label "拆书依赖"
-    Write-OK "拆书依赖已安装（pdfplumber / pypdf / python-docx / lxml）"
+    Write-OK "拆书依赖已安装（pypdf；本地文字层提取已下线，拆书全走 MinerU）"
 
     if (-not $SkipMineru) {
         try {
@@ -207,6 +223,18 @@ if (-not $SkipPython) {
             Write-OK "MinerU 云端 OCR 工具已安装"
         } catch {
             Write-Warn "MinerU 工具安装失败，可稍后手动执行：_工具\.venv\Scripts\pip.exe install mineru-open-api"
+        }
+    }
+
+    # 日程安排层依赖（Google 日历后端 + Windows 时区库）；装不上也不影响 ics 后端
+    $schedReq = Join-Path $RepoRoot "05-日程安排\_脚本\requirements.txt"
+    if (Test-Path -LiteralPath $schedReq) {
+        try {
+            Invoke-PipWithRetry -PipExe $venvPy -PipArgs @("-m", "pip", "install", "--disable-pip-version-check", "-q", "-r", $schedReq) -Label "日程同步依赖"
+            Write-OK "日程同步依赖已安装（google-api-python-client / google-auth-oauthlib / PySocks / tzdata）"
+        } catch {
+            Write-Warn "日程同步依赖没装上：Google 后端暂不可用，ics 后端不受影响。"
+            Write-Warn "稍后可手动执行：_工具\.venv\Scripts\pip.exe install -r 05-日程安排\_脚本\requirements.txt"
         }
     }
 } else {
@@ -224,7 +252,8 @@ Write-Host "  1) 用 Obsidian 打开该文件夹（作为库）"
 Write-Host "  2) 首次打开若提示「信任社区插件」，请选择信任"
 Write-Host "  3) 右侧边栏打开 Claudian，在设置里选择后端（本机 Codex 或 Claude Code）"
 Write-Host "  4) 扫描版/数学书才需要：运行 _工具\设置MinerU令牌.bat 保存 Token"
-Write-Host "  5) 打开 00-使用指南\📖 使用说明.md 开始使用"
+Write-Host "  5) （可选）自检一遍：05-日程安排\_脚本\自检.bat"
+Write-Host "  6) 打开 00-使用指南\📖 使用说明.md 开始使用"
 Write-Host "======================================" -ForegroundColor Green
 
 if ($OpenObsidian) {

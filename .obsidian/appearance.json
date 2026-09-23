@@ -1,5 +1,10 @@
 {
   "accentColor": "",
-  "cssTheme": "",
-  "theme": "obsidian"
+  "cssTheme": "Baseline",
+  "theme": "system",
+  "baseFontSize": 26,
+  "baseFontSizeAction": true,
+  "interfaceFontFamily": "",
+  "textFontFamily": "等距更纱黑体 SC,Sarasa UI J",
+  "monospaceFontFamily": "Sarasa Mono J,等距更纱黑体 SC,霞鹜文楷等宽 GB"
 }

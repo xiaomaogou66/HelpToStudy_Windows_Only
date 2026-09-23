@@ -6,5 +6,8 @@
   "showUnsupportedFiles": true,
   "showLineNumber": true,
   "readableLineLength": false,
-  "useMarkdownLinks": false
+  "useMarkdownLinks": false,
+  "userIgnoreFilters": [
+    "/备份"
+  ]
 }
