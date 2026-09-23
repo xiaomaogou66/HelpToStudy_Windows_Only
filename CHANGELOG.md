@@ -1,5 +1,16 @@
 # 更新记录
 
+## v1.1.2（2026-09-23）
+
+补丁版：修「输出被管道捕获时中文报 UnicodeEncodeError」。
+
+- **UTF-8 输出兜底**：Windows 上双击 `.bat` 有 `chcp 65001` 兜着，但一旦输出被
+  重定向 / 被别的程序捕获（CI、脚本互调、`> 日志.txt`），Python 会用系统本地编码
+  打印中文 → 直接抛 `UnicodeEncodeError`，打卡页 / 导出日历 / today 全失败。
+  现在 `打卡.py`、`周文件夹.py`、`导出ics.py`、`sync_gcal.py` 启动时统一把
+  stdout/stderr 重新配置为 UTF-8（`errors="replace"`，绝不因为一个字符崩掉整条命令）
+- 同步 Linux 版 v0.3.3 的同名修复
+
 ## v1.1.1（2026-09-23）
 
 补丁版：修 Windows 上「没装时区库就崩」的问题，并让 CI 真正跑到这些检查。

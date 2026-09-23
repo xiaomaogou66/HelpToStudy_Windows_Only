@@ -28,6 +28,20 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+def _force_utf8_io() -> None:
+    """Windows 上输出被管道捕获时默认不是 UTF-8，中文会触发 UnicodeEncodeError。
+
+    交互式双击 .bat 有 `chcp 65001` 兜着，但 CI / 重定向 / 被别的脚本调用时必须自己设。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:                              # noqa: BLE001
+            pass
+
+
+_force_utf8_io()
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 VAULT = SCRIPT_DIR.parents[1]
 LOG_DIR = VAULT / "05-日程安排/06-日志"

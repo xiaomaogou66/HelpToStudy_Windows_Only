@@ -66,6 +66,21 @@ DEFAULT_CONFIG = {
     "ics_skip_summary_prefixes": ["📚"],   # 跳过这些开头的条目（📚 = 周决策管理的自习块，避免重复）
 }
 
+def _force_utf8_io() -> None:
+    """Windows 上输出被管道捕获时默认不是 UTF-8，中文会触发 UnicodeEncodeError。
+
+    交互式双击 .bat 有 `chcp 65001` 兜着，但 CI / 重定向 / 被别的脚本调用时必须自己设。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:                              # noqa: BLE001
+            pass
+
+
+_force_utf8_io()
+
+
 SCOPES = {
     "app": ["https://www.googleapis.com/auth/calendar.app.created"],
     "full": ["https://www.googleapis.com/auth/calendar"],

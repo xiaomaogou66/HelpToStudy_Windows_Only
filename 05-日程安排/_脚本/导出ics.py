@@ -30,6 +30,21 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 VAULT = SCRIPT_DIR.parents[1]
 sys.path.insert(0, str(SCRIPT_DIR))
 
+def _force_utf8_io() -> None:
+    """Windows 上输出被管道捕获时默认不是 UTF-8，中文会触发 UnicodeEncodeError。
+
+    交互式双击 .bat 有 `chcp 65001` 兜着，但 CI / 重定向 / 被别的脚本调用时必须自己设。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:                              # noqa: BLE001
+            pass
+
+
+_force_utf8_io()
+
+
 import sync_gcal as S  # noqa: E402  复用任务/课表解析（同一套逻辑，不重复实现）
 
 PLAN_CONFIG = VAULT / "05-日程安排/00-配置/规划配置.json"
