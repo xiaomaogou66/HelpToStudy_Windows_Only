@@ -76,6 +76,16 @@ jobs:
           if ($bad -ne 0) { throw "有 Python 文件语法错误" }
           Write-Host "所有 .py 语法检查通过"
 
+      - name: 仓库内容检查（不该出现的文件）
+        shell: pwsh
+        run: |
+          $bad = @()
+          $bad += Get-ChildItem -Recurse -File -Include *.ics,*.ical |
+                  Where-Object { $_.Name -notin @('课表示例.ics','日程安排.ics') }
+          $bad += Get-ChildItem -Recurse -File -Include calender-*.json,service-account*.json,token.json
+          $bad += Get-ChildItem -Recurse -Directory -Filter "20??-W*"
+          if ($bad) { $bad | ForEach-Object { Write-Host "BAD: $($_.FullName)" }; throw "仓库里出现不该包含的文件" }
+          Write-Host "OK  没有密钥 / 个人课表 / 个人日记"
       - name: 安装最小依赖（tzdata：Windows 的 ZoneInfo 需要）
         shell: pwsh
         run: |
@@ -107,13 +117,3 @@ jobs:
           }
           Write-Host "关键启动器与文档齐备"
 
-      - name: 仓库内容检查（不该出现的文件）
-        shell: pwsh
-        run: |
-          $bad = @()
-          $bad += Get-ChildItem -Recurse -File -Include *.ics,*.ical |
-                  Where-Object { $_.Name -ne "课表示例.ics" }
-          $bad += Get-ChildItem -Recurse -File -Include calender-*.json,service-account*.json,token.json
-          $bad += Get-ChildItem -Recurse -Directory -Filter "20??-W*"
-          if ($bad) { $bad | ForEach-Object { Write-Host "BAD: $($_.FullName)" }; throw "仓库里出现不该包含的文件" }
-          Write-Host "OK  没有密钥 / 个人课表 / 个人日记"
