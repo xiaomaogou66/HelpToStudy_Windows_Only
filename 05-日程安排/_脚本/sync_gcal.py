@@ -291,6 +291,20 @@ def load_config() -> dict:
     return cfg
 
 
+def get_tz(name: str):
+    """取时区：优先 ZoneInfo；Windows 上没装 tzdata 时退回固定偏移，并提示怎么装。"""
+    try:
+        return ZoneInfo(name)
+    except Exception:                                  # noqa: BLE001 ZoneInfoNotFoundError 等
+        hours = {"Asia/Shanghai": 8, "Asia/Tokyo": 9, "Asia/Singapore": 8,
+                 "UTC": 0, "Europe/Madrid": 1, "Europe/London": 0}.get(name, 8)
+        print(
+            f"⚠️  时区库不可用（{name}）：本次退回固定偏移 UTC{hours:+d}，时间不会错，\n"
+            f"     但跨夏令时的地区建议补上时区库：pip install tzdata"
+        )
+        return timezone(timedelta(hours=hours))
+
+
 def resolve_ics_paths(cfg: dict) -> list[Path]:
     """按配置展开课表 ics 路径；一个都没命中时退回「课表示例.ics」，让新库开箱即用。"""
     paths = [q for pattern in cfg.get("ics_files") or [] for q in sorted(VAULT.glob(pattern))]
@@ -636,7 +650,7 @@ def main() -> int:
     if args.future_days is not None:
         cfg["window_future_days"] = args.future_days
 
-    tz = ZoneInfo(cfg["timezone"])
+    tz = get_tz(cfg["timezone"])
     today = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
     win_lo = today - timedelta(days=int(cfg["window_past_days"]))
     win_hi = today + timedelta(days=int(cfg["window_future_days"]))

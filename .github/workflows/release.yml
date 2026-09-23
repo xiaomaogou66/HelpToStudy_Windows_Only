@@ -76,6 +76,12 @@ jobs:
           if ($bad -ne 0) { throw "有 Python 文件语法错误" }
           Write-Host "所有 .py 语法检查通过"
 
+      - name: 安装最小依赖（tzdata：Windows 的 ZoneInfo 需要）
+        shell: pwsh
+        run: |
+          python -m pip install --quiet --disable-pip-version-check tzdata
+          Write-Host "tzdata 已安装"
+
       - name: 日程安排层自检（离线）
         shell: pwsh
         run: |

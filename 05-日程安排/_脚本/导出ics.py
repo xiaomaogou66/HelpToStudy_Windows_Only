@@ -46,7 +46,7 @@ def load_plan() -> dict:
 
 def collect(cfg: dict, win_lo: datetime, win_hi: datetime, ics_override: str | None) -> tuple[list, list]:
     """窗口内的事件：笔记任务 + 课表展开（与 Google 后端完全同一套解析）。"""
-    tz = ZoneInfo(cfg["timezone"])
+    tz = S.get_tz(cfg["timezone"])
     tasks = [t for t in S.parse_tasks(VAULT, cfg["task_globs"], tz) if win_lo <= t["start"] < win_hi]
     if ics_override:
         given = Path(ics_override)
@@ -185,7 +185,7 @@ def main() -> int:
     if args.future_days is not None:
         cfg["window_future_days"] = args.future_days
 
-    tz = ZoneInfo(cfg["timezone"])
+    tz = S.get_tz(cfg["timezone"])
     today = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
     win_lo = today - timedelta(days=int(cfg["window_past_days"]))
     win_hi = today + timedelta(days=int(cfg["window_future_days"]))

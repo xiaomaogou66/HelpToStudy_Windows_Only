@@ -66,7 +66,7 @@ def week_of(d: datetime) -> str:
 
 def courses_by_day(mon: datetime, sun: datetime, cfg: dict) -> dict:
     """{日期字符串: [(时间, 课程名, 教室)]}，只含这周的课。"""
-    tz = ZoneInfo(cfg["timezone"])
+    tz = S.get_tz(cfg["timezone"])
     lo = mon.replace(hour=0, minute=0, tzinfo=tz)
     hi = (sun + timedelta(days=1)).replace(hour=0, minute=0, tzinfo=tz)
     paths = S.resolve_ics_paths(cfg)
@@ -257,9 +257,9 @@ def main() -> int:
     print_only = "--print" in args
     args = [a for a in args if a != "--print"]
     cfg = S.load_config()
-    week = args[0] if args else week_of(datetime.now(ZoneInfo(cfg["timezone"])))
+    week = args[0] if args else week_of(datetime.now(S.get_tz(cfg["timezone"])))
     mon, sun = week_dates(week)
-    full_week = week == week_of(datetime.now(ZoneInfo(cfg["timezone"])))
+    full_week = week == week_of(datetime.now(S.get_tz(cfg["timezone"])))
     rules = load_rules()
 
     cbd = courses_by_day(mon, sun, cfg)
