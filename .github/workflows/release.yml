@@ -102,7 +102,8 @@ jobs:
             }
             if ($lf -gt 0) { throw "$($b.Name) 存在裸 LF" }
             $text = [IO.File]::ReadAllText($b.FullName, [Text.Encoding]::ASCII)
-            if ($text -notmatch "-Part (all|learn|schedule)") { throw "$($b.Name) 没带 -Part" }
+            if ($text -notmatch 'set "PART=(all|learn|schedule)"') { throw "$($b.Name) 没带 -Part" }
+            if ($text -notmatch "-Part %PART%") { throw "$($b.Name) 没把 -Part 传给安装器" }
             Write-Host "OK  $($b.Name)  CRLF / -Part"
           }
           Write-Host "三个包的内容与三个引导器都校验通过"
