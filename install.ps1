@@ -15,6 +15,12 @@
       .\install.ps1
       .\install.ps1 -VaultPath "D:\我的资料\AI学习工作流" -OpenObsidian
       .\install.ps1 -SkipPython -SkipMineru
+      .\install.ps1 -Part learn            # 只装学习部分（不含 05-日程安排）
+      .\install.ps1 -Part schedule         # 只补日程安排层到已有库
+.PARAMETER Part
+    装哪一部分：all（默认，学习部分 + 日程安排层）/ learn（只有学习部分：拆书、主题、
+    学案、测试、速查表）/ schedule（只有日程安排层 + /周决策 /课表，可补装进已有库；
+    个人笔记与学习内容一律不动）。也接受中文写法：全部 / 学习 / 日程。
 .PARAMETER VaultPath
     库的安装位置（默认 %USERPROFILE%\ObsidianVaults\AI学习工作流）
 .PARAMETER PythonPath
@@ -37,6 +43,8 @@
     .\install.ps1 -NoDialog -SkipPython
 #>
 param(
+    [ValidateSet("all", "learn", "schedule", "全部", "学习", "日程")]
+    [string]$Part = "all",
     [string]$VaultPath = "",
     [string]$PythonPath = "",
     [switch]$SkipPython,
@@ -48,6 +56,22 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# ---------- 装哪一部分 ----------
+$PartMap = @{ "全部" = "all"; "学习" = "learn"; "日程" = "schedule" }
+if ($PartMap.ContainsKey($Part)) { $Part = $PartMap[$Part] }
+$InstallLearn = $Part -ne "schedule"      # 学习部分：00-04 + 拆书工具 + 学习类命令/skill
+$InstallSchedule = $Part -ne "learn"      # 日程安排层：05-日程安排 + /周决策 /课表
+$PartLabel = @{
+    "all"      = "学习部分 + 日程安排层（全量）"
+    "learn"    = "只装学习部分（不含 05-日程安排）"
+    "schedule" = "只装日程安排层（补装到已有库，不动学习内容）"
+}[$Part]
+# 日程安排层的两个命令 / 两个 skill：学习版不带，日程版只带这四个
+$ScheduleOnlyFiles = @(
+    ".claude\commands\周决策.md", ".claude\commands\课表.md",
+    ".pi\skills\zhou-jue-ce.md", ".pi\skills\ke-biao.md"
+)
 
 # ---------- 工具函数 ----------
 function Write-Step([string]$msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
@@ -122,6 +146,7 @@ Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "   AI 学习工作流 · 一键安装" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "   安装位置: $VaultPath"
+Write-Host "   安装内容: $PartLabel"
 
 # 已存在处理
 if (Test-Path -LiteralPath $VaultPath) {
@@ -136,12 +161,15 @@ if (Test-Path -LiteralPath $VaultPath) {
 
 # ---------- 1. 创建目录 ----------
 Write-Step "第 1 步：创建库目录结构"
-$dirs = @(
-    "00-使用指南", "01-提示词库", "02-模板", "03-学习主题", "04-教材分块",
-    "_工具", "copilot\copilot-custom-prompts", "images",
-    "05-日程安排\00-配置", "05-日程安排\_脚本", "05-日程安排\06-日志",
-    "05-日程安排\_资源\日历", "05-日程安排\_归档", ".pi\skills"
-)
+$dirs = @("_工具")
+if ($InstallLearn) {
+    $dirs += @("00-使用指南", "01-提示词库", "02-模板", "03-学习主题", "04-教材分块",
+               "copilot\copilot-custom-prompts", "images")
+}
+if ($InstallSchedule) {
+    $dirs += @("05-日程安排\00-配置", "05-日程安排\_脚本", "05-日程安排\06-日志",
+               "05-日程安排\_资源\日历", "05-日程安排\_归档")
+}
 foreach ($d in $dirs) {
     New-Item -ItemType Directory -Force -Path (Join-Path $VaultPath $d) | Out-Null
 }
@@ -149,24 +177,54 @@ Write-OK "目录结构已就绪"
 
 # ---------- 2. 复制内容 ----------
 Write-Step "第 2 步：复制模板 / 提示词 / 命令 / 配置"
-$copyDirs = @("00-使用指南", "01-提示词库", "02-模板", "05-日程安排", ".claude", ".pi", "copilot", ".obsidian")
+$copyDirs = @()
+if ($InstallLearn)    { $copyDirs += @("00-使用指南", "01-提示词库", "02-模板", "copilot", ".obsidian") }
+if ($InstallSchedule) { $copyDirs += @("05-日程安排") }
 foreach ($d in $copyDirs) {
     $src = Join-Path $RepoRoot $d
     if (-not (Test-Path -LiteralPath $src)) { continue }
-    if ($d -eq ".obsidian" -and $SkipPlugins) {
-        robocopy $src (Join-Path $VaultPath $d) /E /XD plugins /XF data.json workspace.json /NFL /NDL /NJH /NJS /R:2 /W:1 | Out-Null
-    } else {
-        robocopy $src (Join-Path $VaultPath $d) /E /XF data.json workspace.json /NFL /NDL /NJH /NJS /R:2 /W:1 | Out-Null
-    }
+    $rcArgs = @($src, (Join-Path $VaultPath $d), "/E", "/XF", "data.json", "workspace.json")
+    if ($d -eq ".obsidian" -and $SkipPlugins) { $rcArgs += @("/XD", "plugins") }
+    $rcArgs += @("/NFL", "/NDL", "/NJH", "/NJS", "/R:2", "/W:1")
+    & robocopy @rcArgs | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "复制 $d 失败（错误码 $LASTEXITCODE）" }
 }
-Copy-Item -LiteralPath (Join-Path $RepoRoot "03-学习主题\📌 从这里开始.md") -Destination (Join-Path $VaultPath "03-学习主题\") -Force
-Copy-Item -LiteralPath (Join-Path $RepoRoot "04-教材分块\📖 教材分块说明.md") -Destination (Join-Path $VaultPath "04-教材分块\") -Force
-Copy-Item -LiteralPath (Join-Path $RepoRoot "AGENTS.md") -Destination $VaultPath -Force
-Copy-Item -LiteralPath (Join-Path $RepoRoot "CLAUDE.md") -Destination $VaultPath -Force
+
+# .claude / .pi 两个目录是学习与日程共用的：按 -Part 只放该放的那几个
+if ($Part -eq "schedule") {
+    foreach ($rel in $ScheduleOnlyFiles) {
+        $src = Join-Path $RepoRoot $rel
+        if (-not (Test-Path -LiteralPath $src)) { continue }
+        $dst = Join-Path $VaultPath $rel
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
+        Copy-Item -LiteralPath $src -Destination $dst -Force
+    }
+} else {
+    foreach ($d in @(".claude", ".pi")) {
+        $src = Join-Path $RepoRoot $d
+        if (-not (Test-Path -LiteralPath $src)) { continue }
+        $rcArgs = @($src, (Join-Path $VaultPath $d), "/E")
+        if ($Part -eq "learn") {
+            $rcArgs += @("/XF", "周决策.md", "课表.md", "zhou-jue-ce.md", "ke-biao.md")
+        }
+        $rcArgs += @("/NFL", "/NDL", "/NJH", "/NJS", "/R:2", "/W:1")
+        & robocopy @rcArgs | Out-Null
+        if ($LASTEXITCODE -ge 8) { throw "复制 $d 失败（错误码 $LASTEXITCODE）" }
+    }
+}
+
+if ($InstallLearn) {
+    Copy-Item -LiteralPath (Join-Path $RepoRoot "03-学习主题\📌 从这里开始.md") -Destination (Join-Path $VaultPath "03-学习主题\") -Force
+    Copy-Item -LiteralPath (Join-Path $RepoRoot "04-教材分块\📖 教材分块说明.md") -Destination (Join-Path $VaultPath "04-教材分块\") -Force
+    Copy-Item -LiteralPath (Join-Path $RepoRoot "AGENTS.md") -Destination $VaultPath -Force
+    Copy-Item -LiteralPath (Join-Path $RepoRoot "CLAUDE.md") -Destination $VaultPath -Force
+}
 # _工具 整目录复制：拆书脚本 + 相对路径启动器 + requirements.txt（排除虚拟环境与缓存）
-robocopy (Join-Path $RepoRoot "_工具") (Join-Path $VaultPath "_工具") /E /XD .venv __pycache__ /NFL /NDL /NJH /NJS /R:2 /W:1 | Out-Null
-if ($LASTEXITCODE -ge 8) { throw "复制 _工具 失败（错误码 $LASTEXITCODE）" }
+# 只装日程安排层时不带 _工具（虚拟环境仍会建在 _工具\.venv 下）
+if ($InstallLearn -and (Test-Path -LiteralPath (Join-Path $RepoRoot "_工具"))) {
+    robocopy (Join-Path $RepoRoot "_工具") (Join-Path $VaultPath "_工具") /E /XD .venv __pycache__ /NFL /NDL /NJH /NJS /R:2 /W:1 | Out-Null
+    if ($LASTEXITCODE -ge 8) { throw "复制 _工具 失败（错误码 $LASTEXITCODE）" }
+}
 # 日程安排层：任何密钥 / 令牌类文件都不带入目标库
 @("calender-*.json", "service-account*.json", "token.json", "credentials.json") | ForEach-Object {
     Get-ChildItem -Path (Join-Path $VaultPath "05-日程安排\_脚本") -Filter $_ -ErrorAction SilentlyContinue |
@@ -214,21 +272,23 @@ if (-not $SkipPython) {
         & $py -m venv (Join-Path $VaultPath "_工具\.venv")
         if ($LASTEXITCODE -ne 0) { throw "创建 Python 虚拟环境失败" }
     }
-    Invoke-PipWithRetry -PipExe $venvPy -PipArgs @("-m", "pip", "install", "--disable-pip-version-check", "-q", "-r", (Join-Path $RepoRoot "requirements.txt")) -Label "拆书依赖"
-    Write-OK "拆书依赖已安装（pypdf；本地文字层提取已下线，拆书全走 MinerU）"
+    if ($InstallLearn) {
+        Invoke-PipWithRetry -PipExe $venvPy -PipArgs @("-m", "pip", "install", "--disable-pip-version-check", "-q", "-r", (Join-Path $RepoRoot "requirements.txt")) -Label "拆书依赖"
+        Write-OK "拆书依赖已安装（pypdf；本地文字层提取已下线，拆书全走 MinerU）"
 
-    if (-not $SkipMineru) {
-        try {
-            Invoke-PipWithRetry -PipExe $venvPy -PipArgs @("-m", "pip", "install", "--disable-pip-version-check", "-q", "mineru-open-api") -Label "MinerU 工具"
-            Write-OK "MinerU 云端 OCR 工具已安装"
-        } catch {
-            Write-Warn "MinerU 工具安装失败，可稍后手动执行：_工具\.venv\Scripts\pip.exe install mineru-open-api"
+        if (-not $SkipMineru) {
+            try {
+                Invoke-PipWithRetry -PipExe $venvPy -PipArgs @("-m", "pip", "install", "--disable-pip-version-check", "-q", "mineru-open-api") -Label "MinerU 工具"
+                Write-OK "MinerU 云端 OCR 工具已安装"
+            } catch {
+                Write-Warn "MinerU 工具安装失败，可稍后手动执行：_工具\.venv\Scripts\pip.exe install mineru-open-api"
+            }
         }
     }
 
     # 日程安排层依赖（Google 日历后端 + Windows 时区库）；装不上也不影响 ics 后端
     $schedReq = Join-Path $RepoRoot "05-日程安排\_脚本\requirements.txt"
-    if (Test-Path -LiteralPath $schedReq) {
+    if ($InstallSchedule -and (Test-Path -LiteralPath $schedReq)) {
         try {
             Invoke-PipWithRetry -PipExe $venvPy -PipArgs @("-m", "pip", "install", "--disable-pip-version-check", "-q", "-r", $schedReq) -Label "日程同步依赖"
             Write-OK "日程同步依赖已安装（google-api-python-client / google-auth-oauthlib / PySocks / tzdata）"
@@ -246,14 +306,19 @@ Write-Step "第 4 步：收尾"
 Write-Host ""
 Write-Host "============== 安装完成 ==============" -ForegroundColor Green
 Write-Host "  库位置: $VaultPath"
+Write-Host "  安装内容: $PartLabel"
 Write-Host ""
 Write-Host "  接下来："
-Write-Host "  1) 用 Obsidian 打开该文件夹（作为库）"
-Write-Host "  2) 首次打开若提示「信任社区插件」，请选择信任"
-Write-Host "  3) 右侧边栏打开 Claudian，在设置里选择后端（本机 Codex 或 Claude Code）"
-Write-Host "  4) 扫描版/数学书才需要：运行 _工具\设置MinerU令牌.bat 保存 Token"
-Write-Host "  5) （可选）自检一遍：05-日程安排\_脚本\自检.bat"
-Write-Host "  6) 打开 00-使用指南\📖 使用说明.md 开始使用"
+Write-Host "  · 用 Obsidian 打开该文件夹（作为库）；首次若提示「信任社区插件」选信任"
+if ($InstallLearn) {
+    Write-Host "  · 右侧边栏打开 Claudian，选后端（本机 Codex 或 Claude Code）"
+    Write-Host "  · 扫描版/数学书才需要：_工具\设置MinerU令牌.bat 保存 Token"
+    Write-Host "  · 打开 00-使用指南\📖 使用说明.md 开始使用"
+}
+if ($InstallSchedule) {
+    Write-Host "  · 先填 05-日程安排\00-配置\规划配置.json，再跑 05-日程安排\_脚本\自检.bat 体检"
+    Write-Host "  · 每周日跑 /周决策；日历双后端配置见 05-日程安排\00-配置\多端同步.md"
+}
 Write-Host "======================================" -ForegroundColor Green
 
 if ($OpenObsidian) {

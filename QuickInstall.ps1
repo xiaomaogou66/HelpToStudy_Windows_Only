@@ -28,10 +28,15 @@
     透传给 install.ps1：目标目录已存在时不询问，直接继续。
 .PARAMETER NoOpenObsidian
     安装完成后不自动打开 Obsidian。
+.PARAMETER Part
+    装哪一部分：all（默认，学习部分 + 日程安排层）/ learn（只有学习部分）/
+    schedule（只有日程安排层，可补装进已有库）。透传给 install.ps1；
+    三个 Release 引导器已经分别带好了这个参数。
 .EXAMPLE
     .\QuickInstall.ps1
     .\QuickInstall.ps1 -VaultPath "D:\我的资料\AI学习工作流" -NoOpenObsidian
     .\QuickInstall.ps1 -SkipEnv -NoDialog
+    .\QuickInstall.ps1 -Part schedule
 #>
 param(
     [switch]$SkipEnv,
@@ -42,7 +47,9 @@ param(
     [switch]$SkipPython,
     [switch]$SkipMineru,
     [switch]$Force,
-    [switch]$NoOpenObsidian
+    [switch]$NoOpenObsidian,
+    [ValidateSet("all", "learn", "schedule", "全部", "学习", "日程")]
+    [string]$Part = "all"
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,6 +63,16 @@ Write-Host ""
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "   AI 学习工作流 · 一键安装（Release 版）" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
+$PartLabel = @{
+    "all"      = "学习部分 + 日程安排层（全量）"
+    "learn"    = "只装学习部分（不含 05-日程安排）"
+    "schedule" = "只装日程安排层（补装到已有库）"
+    "全部"     = "学习部分 + 日程安排层（全量）"
+    "学习"     = "只装学习部分（不含 05-日程安排）"
+    "日程"     = "只装日程安排层（补装到已有库）"
+}[$Part]
+if (-not $PartLabel) { $PartLabel = $Part }
+Write-Host "   本次安装: $PartLabel"
 
 # ---------- 1. 环境检测/安装 ----------
 if (-not $SkipEnv) {
@@ -83,6 +100,7 @@ if ($NoDialog)   { $installArgs["NoDialog"] = $true }
 if ($SkipPython) { $installArgs["SkipPython"] = $true }
 if ($SkipMineru) { $installArgs["SkipMineru"] = $true }
 if ($Force)      { $installArgs["Force"] = $true }
+$installArgs["Part"] = $Part
 try {
     & (Join-Path $Root "install.ps1") @installArgs
 } catch {
@@ -96,9 +114,16 @@ if ($LASTEXITCODE -eq 1 -and -not $SkipPython) {
 
 Write-Host ""
 Write-Host "============== 全部完成 ==============" -ForegroundColor Green
+Write-Host "  库内容: $PartLabel"
 Write-Host "  1) Obsidian 已打开（或在开始菜单中打开）"
 Write-Host "  2) 首次打开若提示「信任社区插件」，请选择信任"
-Write-Host "  3) 右侧边栏打开 Claudian，在设置里选择后端（本机 Codex 或 Claude Code）"
-Write-Host "  4) 扫描版/数学书才需要：运行 _工具\设置MinerU令牌.bat 保存 Token"
-Write-Host "  5) 打开 00-使用指南\📖 使用说明.md 开始使用"
+if ($Part -notin @("schedule", "日程")) {
+    Write-Host "  3) 右侧边栏打开 Claudian，在设置里选择后端（本机 Codex 或 Claude Code）"
+    Write-Host "  4) 扫描版/数学书才需要：运行 _工具\设置MinerU令牌.bat 保存 Token"
+    Write-Host "  5) 打开 00-使用指南\📖 使用说明.md 开始使用"
+}
+if ($Part -in @("all", "schedule", "全部", "日程")) {
+    Write-Host "  · 日程安排层：先填 05-日程安排\00-配置\规划配置.json，再跑 05-日程安排\_脚本\自检.bat 体检"
+    Write-Host "  · 日历双后端（ics / Google）配置见 05-日程安排\00-配置\多端同步.md"
+}
 Write-Host "======================================" -ForegroundColor Green

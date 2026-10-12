@@ -44,6 +44,69 @@ jobs:
           # 必须显式 exit 0 避免被误判为失败。
           exit 0
 
+      - name: 校验资产（三个包的内容 + 三个引导器的行尾）
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.build.outputs.tag }}"
+          $outDir = Join-Path $env:RUNNER_TEMP "release"
+          $full  = "HelpToStudy-Vault-$tag.zip"
+          $learn = "HelpToStudy-学习版-Vault-$tag.zip"
+          $sched = "HelpToStudy-日程版-Vault-$tag.zip"
+          foreach ($n in @($full, $learn, $sched,
+                           "HelpToStudy-QuickInstall.bat", "HelpToStudy-学习版-QuickInstall.bat",
+                           "HelpToStudy-日程版-QuickInstall.bat", "release-notes.md")) {
+            if (-not (Test-Path -LiteralPath (Join-Path $outDir $n))) { throw "缺少资产：$n" }
+          }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          function Get-ZipNames([string]$p) {
+            $z = [System.IO.Compression.ZipFile]::OpenRead($p)
+            try { return @($z.Entries | ForEach-Object { $_.FullName }) } finally { $z.Dispose() }
+          }
+          function Assert-Has([string[]]$names, [string]$needle, [string]$who) {
+            if (-not ($names | Where-Object { $_ -eq $needle })) { throw "$who 缺少 $needle" }
+          }
+          function Assert-No([string[]]$names, [string]$prefix, [string]$who) {
+            $hit = $names | Where-Object { $_.StartsWith($prefix) } | Select-Object -First 1
+            if ($hit) { throw "$who 不该包含 $hit" }
+          }
+          $nFull  = Get-ZipNames (Join-Path $outDir $full)
+          $nLearn = Get-ZipNames (Join-Path $outDir $learn)
+          $nSched = Get-ZipNames (Join-Path $outDir $sched)
+          # 全量：两部分都在
+          foreach ($need in @("install.ps1", "QuickInstall.ps1", "_工具/拆书.bat",
+                              ".claude/commands/拆书.md", ".claude/commands/周决策.md",
+                              "05-日程安排/_脚本/自检.bat")) { Assert-Has $nFull $need "全量包" }
+          # 学习版：只有学习部分
+          foreach ($need in @("install.ps1", "_工具/拆书.bat", ".claude/commands/拆书.md")) {
+            Assert-Has $nLearn $need "学习版"
+          }
+          Assert-No $nLearn "05-日程安排/" "学习版"
+          foreach ($no in @(".claude/commands/周决策.md", ".claude/commands/课表.md",
+                            ".pi/skills/zhou-jue-ce.md", ".pi/skills/ke-biao.md")) {
+            if ($nLearn -contains $no) { throw "学习版不该带 $no" }
+          }
+          # 日程版：只有日程安排层 + 安装器
+          foreach ($need in @("install.ps1", "05-日程安排/_脚本/自检.bat",
+                              ".claude/commands/周决策.md", ".pi/skills/zhou-jue-ce.md")) {
+            Assert-Has $nSched $need "日程版"
+          }
+          foreach ($no in @("01-提示词库/", "02-模板/", "03-学习主题/", "04-教材分块/", "_工具/")) {
+            Assert-No $nSched $no "日程版"
+          }
+          # 引导器：必须 CRLF（cmd 下裸 LF 会报错）+ 含 -Part
+          foreach ($b in Get-ChildItem -LiteralPath $outDir -Filter *.bat -File) {
+            $bytes = [IO.File]::ReadAllBytes($b.FullName)
+            $lf = 0
+            for ($i = 0; $i -lt $bytes.Length; $i++) {
+              if ($bytes[$i] -eq 10 -and ($i -eq 0 -or $bytes[$i-1] -ne 13)) { $lf++ }
+            }
+            if ($lf -gt 0) { throw "$($b.Name) 存在裸 LF" }
+            $text = [IO.File]::ReadAllText($b.FullName, [Text.Encoding]::ASCII)
+            if ($text -notmatch "-Part (all|learn|schedule)") { throw "$($b.Name) 没带 -Part" }
+            Write-Host "OK  $($b.Name)  CRLF / -Part"
+          }
+          Write-Host "三个包的内容与三个引导器都校验通过"
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -51,11 +114,24 @@ jobs:
         run: |
           $tag = "${{ steps.build.outputs.tag }}"
           $outDir = Join-Path $env:RUNNER_TEMP "release"
-          gh release create "$tag" `
-            (Join-Path $outDir "HelpToStudy-Vault-$tag.zip") `
-            (Join-Path $outDir "HelpToStudy-QuickInstall.bat") `
-            --repo "$env:GITHUB_REPOSITORY" `
-            --notes-file (Join-Path $outDir "release-notes.md")
+          $assets = @(Get-ChildItem -LiteralPath $outDir -File |
+                      Where-Object { $_.Name -ne "release-notes.md" } |
+                      Select-Object -ExpandProperty FullName)
+          $exists = $false
+          try {
+            gh release view "$tag" --repo "$env:GITHUB_REPOSITORY" *> $null
+            $exists = ($LASTEXITCODE -eq 0)
+          } catch {
+            $exists = $false
+          }
+          if ($exists) {
+            Write-Host "Release $tag 已存在：只覆盖资产，不改说明正文"
+            gh release upload "$tag" @assets --clobber --repo "$env:GITHUB_REPOSITORY"
+          } else {
+            gh release create "$tag" @assets --repo "$env:GITHUB_REPOSITORY" `
+              --notes-file (Join-Path $outDir "release-notes.md")
+          }
+          if ($LASTEXITCODE -ne 0) { throw "发布 Release 失败" }
 
   # 只报告、不卡发布：CI 里没有真机桌面，但 Python 层与仓库内容能查
   smoke:
@@ -118,3 +194,35 @@ jobs:
           }
           Write-Host "关键启动器与文档齐备"
 
+
+      - name: 分部安装（学习版 / 日程版）
+        shell: pwsh
+        run: |
+          # -SkipPython 是为了跑得快；robocopy 成功也会留下退出码 1，
+          # 所以不校验退出码，直接校验「装出来的东西对不对」。
+          $learn = Join-Path $env:RUNNER_TEMP "smoke-learn"
+          & powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 `
+              -Part learn -VaultPath $learn -NoDialog -SkipPython -Force
+          if (-not (Test-Path -LiteralPath (Join-Path $learn "00-使用指南\📖 使用说明.md"))) { throw "学习版缺 00-使用指南" }
+          if (-not (Test-Path -LiteralPath (Join-Path $learn "_工具\拆书.bat"))) { throw "学习版缺拆书启动器" }
+          if (-not (Test-Path -LiteralPath (Join-Path $learn ".claude\commands\拆书.md"))) { throw "学习版缺 /拆书" }
+          if (Test-Path -LiteralPath (Join-Path $learn "05-日程安排")) { throw "学习版不该带 05-日程安排" }
+          if (Test-Path -LiteralPath (Join-Path $learn ".claude\commands\周决策.md")) { throw "学习版不该带 /周决策" }
+          Write-Host "OK  学习版装出来是对的"
+
+          $sched = Join-Path $env:RUNNER_TEMP "smoke-schedule"
+          & powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 `
+              -Part schedule -VaultPath $sched -NoDialog -SkipPython -Force
+          if (-not (Test-Path -LiteralPath (Join-Path $sched "05-日程安排\_脚本\自检.bat"))) { throw "日程版缺自检.bat" }
+          if (-not (Test-Path -LiteralPath (Join-Path $sched "05-日程安排\00-配置\多端同步.md"))) { throw "日程版缺 00-配置" }
+          if (-not (Test-Path -LiteralPath (Join-Path $sched ".claude\commands\周决策.md"))) { throw "日程版缺 /周决策" }
+          if (-not (Test-Path -LiteralPath (Join-Path $sched ".pi\skills\zhou-jue-ce.md"))) { throw "日程版缺周决策 skill" }
+          if (Test-Path -LiteralPath (Join-Path $sched "01-提示词库")) { throw "日程版不该带学习部分" }
+          Write-Host "OK  日程版只装第六层，学习部分没被动"
+
+          # 日程版叠进学习版库：第二轮不该动学习内容
+          & powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 `
+              -Part schedule -VaultPath $learn -NoDialog -SkipPython -Force
+          if (-not (Test-Path -LiteralPath (Join-Path $learn "05-日程安排\_脚本\自检.bat"))) { throw "叠加装日程层失败" }
+          if (-not (Test-Path -LiteralPath (Join-Path $learn "00-使用指南\📖 使用说明.md"))) { throw "叠加后学习内容不见了" }
+          Write-Host "OK  日程版可以后装进学习版库"
