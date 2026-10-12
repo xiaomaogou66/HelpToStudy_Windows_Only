@@ -284,10 +284,24 @@ def _find_gs() -> str:
 
 MINERU_CACHE_KEEP = 6
 
+# 已知「有编号体系」的教材（UNIDAD 1..N / 第 N 课）：这几本**不要**启用
+# 「主题标题」「名言开场」两条"无章号"策略，否则同一章会被切成好几块。
+# 加新书就往下加关键词（书名/文件名里的片段，大小写无关）。
+NUMBERED_BOOK_KEYWORDS = ["某外语教材", "循序渐进外语语法"]
+
 # 已知书系的「每章固定收尾小节」预设（可选扩展点）：(书名关键词, 收尾小节正则, 章标题特征正则)
 # 不命中也没关系：默认的 auto 会从正文自己挖（《某外语教材》已能自动识别，无需预设）
 #   ("某外语教材", r"作业\s*\(Trabajos de casa", r"^\s*(?:#{1,6}\s*)?(?:[A-Za-z田\s]{0,8})?\b(?:UNIDAD|…)"),
 END_ANCHOR_PRESETS = []
+
+# 已知书系的「每课固定开场小节」预设：(书名关键词, 开场小节正则)
+# 章标题被 OCR 打掉、但每课都以同一个小节开场的书：把开场小节喂给通用编号引擎，
+# 它就能把章界与目录章名对上（实测《大学意大利语教程 1》：不带预设只认出 10 课，
+# 带上 'Impariamo a parlare' 立刻 16 课**精确**切分，不需要按页码估算）。
+OPENER_PRESETS = [
+    ("大学意大利语教程", r"Impariamo a parlare"),
+    ("现代意大利语", r"Impariamo a parlare"),
+]
 
 
 def _mineru_cache_path(src: Path, dpi: int) -> Path:
@@ -1363,6 +1377,31 @@ def _build_bounds(toc, anchors, titles, lines, offsets, scan_end: int, opener_re
     return bounds
 
 
+def _extract_toc_pages(lines, scan_end: int) -> dict:
+    """从目录行里取「章号 → 页码」（`Prima lezione....(1)` / `Chapter 12 饮食健康 145`）。
+
+    只认带**引导点**或**括号页码**的行，避免把正文里的数字当成页码。
+    用途：目录声明 N 章、正文只认出 M 章（章标题被 OCR 打掉）时，按页码比例插值补齐缺号章。
+    """
+    pages = {}
+    for i in range(scan_end):
+        s = lines[i].strip()
+        if not s or len(s) > 130:
+            continue
+        m = re.search(r"\.{2,}\s*\(?\s*(\d{1,4})\s*\)?\s*$", s)
+        if not m:
+            m = re.search(r"\(\s*(\d{1,4})\s*\)\s*$", s)
+        if not m:
+            continue
+        entry = _toc_entry(s)
+        if not entry:
+            continue
+        num = entry[0]
+        if isinstance(num, int) and num > 0:
+            pages.setdefault(num, int(m.group(1)))
+    return pages
+
+
 def build_chapter_plan(text: str, opener_pattern: str = ""):
     """多锚点章节识别引擎。
 
@@ -1395,6 +1434,42 @@ def build_chapter_plan(text: str, opener_pattern: str = ""):
         return None
     bounds.sort(key=lambda b: b[2])
     missing = sorted(set(toc) - {b[0] for b in bounds})
+    estimated = []
+    if missing:
+        # 章标题被 OCR 打掉的缺号章：用目录页码在相邻已定位章之间按比例插值补位
+        # （《大学意大利语教程 1》实测：目录 16 课、正文只认出 10 课 → 补回 16 课）
+        pages = _extract_toc_pages(lines, scan_end)
+        # 虚拟第 0 章：目录区的末尾（页码 0）——用它给"第 1 章"当插值起点
+        last_toc_line = max(
+            (i for i in range(scan_end) if _toc_entry(lines[i].strip())), default=None
+        )
+        virtual0 = (0, "", offsets[last_toc_line] if last_toc_line is not None else 0)
+        if virtual0[1] == "" and last_toc_line is not None:
+            pages.setdefault(0, 0)
+        filled = []
+        for num in missing:
+            before = [b for b in bounds if b[0] < num and b[0] in pages]
+            after = [b for b in bounds if b[0] > num and b[0] in pages]
+            if not before and 0 in pages:
+                before = [virtual0]
+            if num not in pages or not before or not after:
+                continue
+            bl, al = max(before, key=lambda b: b[0]), min(after, key=lambda b: b[0])
+            p0, p1, pt = pages[bl[0]], pages[al[0]], pages[num]
+            if p1 <= p0:
+                continue
+            ratio = max(0.0, min(1.0, (pt - p0) / (p1 - p0)))
+            pos = bl[2] + int((al[2] - bl[2]) * ratio)
+            title = toc.get(num) or f"第 {num} 章"
+            filled.append((num, f"{title}（章界估算·按目录页码插值）", pos))
+            estimated.append(num)
+        if filled:
+            bounds = sorted(bounds + filled, key=lambda b: b[2])
+            missing = sorted(set(toc) - {b[0] for b in bounds})
+            print(
+                f"[目录补齐] 目录 {len(toc)} 章、正文只认出 {len(bounds) - len(filled)} 章 → "
+                f"按目录页码插值补 {len(filled)} 章（章列为估算：{estimated}）"
+            )
     back_matter = None
     if cutoff is not None and cutoff < len(lines) - 2:
         tail = "\n".join(lines[cutoff:]).strip()
@@ -1406,6 +1481,7 @@ def build_chapter_plan(text: str, opener_pattern: str = ""):
         "toc_count": len(toc),
         "missing": missing,
         "back_matter": back_matter,
+        "estimated_filled": estimated,
     }
 
 
@@ -1483,6 +1559,32 @@ def _chapter_label(raws) -> str:
             w = m.group(0)
             seen[w] = seen.get(w, 0) + 1
     return max(seen, key=lambda w: seen[w]) if seen else ""
+
+
+def _looks_numbered_sequence(plan, text_len: int = 0) -> bool:
+    """判断 plan 是否像「完整的 1..N 编号章表」——**章名里真的带章号**才算。
+
+    ⚠️ 不能只看 bounds 的序号：`_plan_from_starts` 对没有章号的标题会**兜底按顺序编号**，
+    那样"5 个主题小节"也会长得像 1..5（《词汇 初级》实测被这条骗过，切回 6 块）。
+    所以必须逐个用 `_unit_number(标题)` 回验：标题里能解出章号、且与序号一致。
+    """
+    if not plan or not plan.get("bounds"):
+        return False
+    bounds = plan["bounds"]
+    if len(bounds) < 4:
+        return False
+    ok = 0
+    for i, (_num, title, _pos) in enumerate(bounds, start=1):
+        n = _unit_number(title)
+        if n is not None and n == i:
+            ok += 1
+    if ok < len(bounds) * 0.8:
+        return False
+    # 还要求「章表从书的前半开始」：否则可能挖到的是书后答案区里的重复小节
+    # （《词汇 初级》实测：书后 5 处「SOLUCIONES」被当成 5 章，标题还写着 UNIDAD 1..5）
+    if text_len and bounds[0][2] > text_len * 0.45:
+        return False
+    return True
 
 
 def _plan_from_starts(text: str, starts, back_line):
@@ -1636,6 +1738,401 @@ def build_chapter_plan_by_end_anchor(
 
 
 ENUM_COLON_RE = re.compile(r"^(?:[IVXLCDM]{1,7}|[0-9]{1,3})\s*[.、．]\s*\S")
+
+# ── 「每单元固定小节 / 单元主题标题」策略（2026-10-07 加）────────────────────
+# 适用：整本书**没有章号**、只有主题标题的教材（词汇/会话/练习册最常见）。
+# 示例：《循序渐进外语词汇》每课固定是「主题标题 → 本课聚焦 → 常用语句 → 注释 → 练习」，
+# 章号只存在于目录表格里（MinerU 把目录渲染成 HTML 表格，编号引擎认不出来）→
+# 于是整本书被切成 1 大块 + 5 小块。本策略直接拿「每单元重复出现的小节」和
+# 「全大写西语 + 中文」的主题标题行当锚点切分。
+#   ① 命中 --opener-pattern（或下面的默认表）的行 = 单元起点附近；
+#   ② 命中 UNIT_THEME_ANCHOR_RE 的标题行（如 `## ANIMALES Y PLANTAS 动物和植物`）= 单元标题；
+#   ③ 两类锚点相距 < UNIT_ANCHOR_MERGE_GAP 行就合并成一个单元（取靠前的）；
+#   ④ 章标题 = 锚点向上最近的标题行，章号按出现顺序。
+UNIT_ANCHOR_MERGE_GAP = 40
+DEFAULT_UNIT_OPENER_RE = re.compile(
+    r"^#{1,6}\s*(?:本课聚焦|本单元聚焦|学习聚焦|本课要点|本单元要点|学习目标|教学目标"
+    r"|Objetivos|Foco|Learning\s+objectives)\b",
+    re.I,
+)
+# 主题标题行：**字母**开头的标题 + 行尾带中文，且拉丁部分里至少有一个 ≥3 个连续大写字母的词
+#   `## ANIMALES Y PLANTAS 动物和植物` ✓   `# EL CARÁCTER 性格` ✓
+#   `## 1 请阅读下文并在正确的单词下面划线。` ✗（数字开头）  `## A. 应该，必须` ✗（没有 3 个连续大写字母）
+#   `# 我们来说说外语吧？` ✗（纯中文行）
+UNIT_THEME_ANCHOR_RE = re.compile(
+    r"^#{1,6}\s*(?P<latin>[A-ZÁÉÍÓÚÜÑÀÈÌÒÙÂÊÎÔÛÇ]"
+    r"[A-ZÁÉÍÓÚÜÑÀÈÌÒÙÂÊÎÔÛÇ0-9\s()\d,.:;'’\-–—/&+]*?)\s*"
+    r"(?P<cjk>[\u4e00-\u9fff].*)$"
+)
+UPPER_WORD_RE = re.compile(r"[A-ZÁÉÍÓÚÜÑÀÈÌÒÙÂÊÎÔÛÇ]{3,}")
+# 「章号关键词 + 中文」型标题：章号被 OCR 吃掉或没写成数字时仍然能认
+#   `## Chapter 太空探索` ✓   `# UNIT 3 环境保护` ✓   `## 第3章 自然地理` ✓
+CHAPTER_KEYWORD_RE = re.compile(
+    r"^#{1,6}\s*(?:Chapter|Unit|Lesson|Lección|Lezione|Unité|Kapitel|Section"
+    r"|第\s*[0-9一二三四五六七八九十百]{1,4}\s*[章单节课])\s*[:：]?\s*[\u4e00-\u9fff]"
+)
+
+
+# 结构小节名黑名单：这些是"每课都有"的骨架小节，不是单元主题（否则《某外语教材》会被切碎）
+STRUCT_HEAD_WORDS = {
+    "UNIDAD", "TEXTOS", "TEXTO", "VOCABULARIO", "GRAMATICA", "GRAMÁTICA", "FONETICA", "FONÉTICA",
+    "EJERCICIOS", "EJERCICIO", "NOTAS", "LECTURA", "PALABRAS", "DIALOGO", "DIÁLOGO",
+    "TEMA", "TEMAS", "CONTENIDO", "OBJETIVOS", "PREGUNTAS", "DICTADO", "RESUMEN",
+    "CULTURA", "COMUNICACION", "COMUNICACIÓN", "ADICIONALES", "SUPLEMENTARIOS",
+    "KEY", "WORDS", "NOTES", "EXERCISES", "READING", "LISTENING", "SPEAKING", "WRITING",
+}
+# 罗马数字题号开头（`VII. 请…`）不是主题标题
+ROMAN_ITEM_RE = re.compile(r"^\s*(?:[IVXLCDM]{1,7})\s*[\.、．]\s")
+
+
+def _is_unit_theme_anchor(s: str) -> bool:
+    """是否是「主题标题行」（《循序渐进外语词汇》每课标题 / 丢了章号的 Chapter 标题）。
+
+    要同时躲开三类假阳性：① 词条行（数字/字母题号开头）② 骨架小节（TEXTOS 课文、词汇表…）
+    ③ 罗马数字习题（`VII. 请跟随录音朗读…`）。
+    """
+    t = s.strip()
+    if ROMAN_ITEM_RE.match(t):
+        return False
+    if CHAPTER_KEYWORD_RE.match(t):
+        return True
+    m = UNIT_THEME_ANCHOR_RE.match(t)
+    if not (m and UPPER_WORD_RE.search(m.group("latin"))):
+        return False
+    first = re.findall(r"[A-ZÁÉÍÓÚÜÑÀÈÌÒÙÂÊÎÔÛÇ]{3,}", m.group("latin"))
+    return bool(first) and first[0].upper() not in STRUCT_HEAD_WORDS
+# 书后部分（自测/答案/词汇表/索引）：比 _find_back_matter_cutoff 更确定，先试它
+BACK_MATTER_HEAD_RE = re.compile(
+    r"^#{0,6}\s*(?:TEST\s|SOLUCIONES|SOLUTIONS?\b|GLOSARIO|ANSWER|APPENDIX"
+    r"|参考答案|答案与解析|答案|附录|索引|总词汇表|词汇表\s*$|INDEX\b)",
+    re.I,
+)
+
+
+# ── 「名言开场 + 章号页眉」策略（2026-10-07 加）────────────────────────────
+# 适用：正文**整章没有章标题**、但每章以「英文名言 + 署名 + 中文译文 + ——出处」开场的书
+# （外语科/托福/升学考试词书很常见，如《外语科词汇真经》22 章只留下 9 个 Chapter 标题）。
+# 证据链（《外语科词汇真经》实测）：
+#   ① 名言块：`… —Rabindranath Tagore`（行尾署名）或单独一行 `—Marcus Tullius Cicero`
+#   ② 章号页眉：`## 14` / `17`（OCR 只抓到了章号，标题丢了）
+#   ③ `Chapter 太空探索` 这类标题行（有的有、有的没有）
+# 章名从**书的目录**里按号取（目录行形如 `Chapter 12 饮食健康 145`），
+# 章界缺号时用「相邻两个真锚点 + 目录页码」按页数比例插值补一个（标题里标「章界估算」）。
+TOC_CHAPTER_LINE_RE = re.compile(
+    r"^\s*(?:Chapter|Unit|Lesson|Lecci[óo]n|Lezione|Unit[ée]|Kapitel|Teil|Part)\s*0*(\d{1,3})"
+    r"\s*[\.:、]?\s*(\S[^\d]{0,44}?)\s+0*(\d{1,5})\s*$",
+    re.I,
+)
+TOC_CHAPTER_LINE_CN_RE = re.compile(
+    r"^\s*第\s*([0-9一二三四五六七八九十百]{1,4})\s*[章课单元]\s*(\S[^\d]{0,44}?)\s+0*(\d{1,5})\s*$"
+)
+# 只认「Chapter 12 饮食健康」/「Chapter 12」/「Chapter 饮食健康」——不认词条 `## chapter /'tʃæptə/`
+CHAPTER_KEYWORD_HEAD_RE = re.compile(
+    r"^#{1,6}\s*(?:Chapter|Unit|Lesson|Lecci[óo]n|Lezione|Unit[ée]|Kapitel)\s*0*(\d{1,3})?"
+    r"\s*(?:[\u4e00-\u9fff][^\n]*)?$",
+    re.I,
+)
+PAGE_NUM_HEAD_RE = re.compile(r"^#{0,6}\s*0*(\d{1,3})\s*$")
+# 行尾署名（名言出处）：`… —Rabindranath Tagore` / `—Leo Tolstoy 中文译文`
+# ⚠️ 只认全角破折号 —— / —（连字符 `-` 会误伤 `---` 分隔线和 `Asian-Pacific` 这种词）
+QUOTE_TAIL_ATTR_RE = re.compile(r"[—–]{1,2}\s*[A-Z][A-Za-z\.\-\'’ ]{2,30}\s*(?:[\u4e00-\u9fff].*)?$")
+# 独立署名行 / 全角中文出处行（`——西塞罗` / `——《舌尖上的中国》`）
+QUOTE_ATTR_LINE_RE = re.compile(r"^(?:—{1,2}|–{1,2})\s*\S")
+# MinerU 的幻觉噪声行（识别"只有一条横线"时的自白），不能当章首
+NOISE_LINE_RE = re.compile(r"^The Ground Truth image displays|^\s*$")
+QUOTE_ANCHOR_MERGE_GAP = 200
+
+
+def _toc_chapter_names(lines, scan_end: int):
+    """从目录行 `Chapter 12 饮食健康 145` 里取 {章号: (章名, 页码)}。"""
+    out = {}
+    for i in range(scan_end):
+        s = lines[i].strip()
+        if not s or len(s) > 90:
+            continue
+        m = TOC_CHAPTER_LINE_RE.match(s)
+        if m:
+            out[int(m.group(1))] = (m.group(2).strip(), int(m.group(3)))
+            continue
+        m2 = TOC_CHAPTER_LINE_CN_RE.match(s)
+        if m2:
+            n = _cn_to_int(m2.group(1)) if not m2.group(1).isdigit() else int(m2.group(1))
+            out[n] = (m2.group(2).strip(), int(m2.group(3)))
+    return out
+
+
+def build_quote_anchor_plan(text: str):
+    """按「每章开场的名言块 + 章号页眉 + Chapter 标题」切分（章标题整批丢失的书专用）。
+
+    返回与 build_chapter_plan 同构的 dict（含 front_matter / back_matter / estimated_missing）。
+    """
+    lines = text.split("\n")
+    offsets = _line_offsets(lines)
+    back_line = _find_back_matter_cutoff(lines)
+    scan_end = back_line if back_line is not None else len(lines)
+    toc = _toc_chapter_names(lines, scan_end)
+    if len(toc) < 3:
+        return None
+
+    def is_noise(s: str) -> bool:
+        return bool(NOISE_LINE_RE.match(s)) or s.lstrip().startswith(("<", "![", "|"))
+
+    def quote_block_start(i: int) -> int:
+        """从署名/出处行向上回退到名言块的第一行（最多 8 行）。"""
+        top = i
+        for k in range(i - 1, max(-1, i - 8), -1):
+            s = lines[k].strip()
+            if not s or (not is_noise(lines[k]) and not s.startswith("#") and len(s) > 0):
+                top = k
+            else:
+                break
+        return top
+
+    # 目录区（书前）里的名言/数字一律不算章界
+    toc_end = max(
+        (i for i in range(scan_end)
+         if TOC_CHAPTER_LINE_RE.match(lines[i].strip()) or TOC_CHAPTER_LINE_CN_RE.match(lines[i].strip())),
+        default=0,
+    )
+
+    def is_quote_opener(i: int) -> bool:
+        """判断第 i 行是不是「章首名言块」的一部分（书里名言块是空行分隔的，所以看 ±6 行窗口）。
+
+        真章首名言（《外语科词汇真经》每章一个）：英文名言 → `—作者` → 中文译文 → `——出处` → 装饰图。
+        词条引文、`---` 分隔线都没有「——中文出处」也不是「近旁有章标题/章号页眉」→ 假锚点被挡掉。
+        """
+        win = [lines[k].strip() for k in range(max(0, i - 6), min(scan_end, i + 7))]
+        if any("——" in x for x in win):
+            return True
+        for t in win:
+            if CHAPTER_KEYWORD_HEAD_RE.match(t):
+                return True
+            m = PAGE_NUM_HEAD_RE.match(t)
+            if m and int(m.group(1)) in toc:
+                return True
+        return False
+
+    raw = []  # (line_idx, explicit_num, explicit_name)
+    for i in range(scan_end):
+        s = lines[i].strip()
+        if not s or is_noise(lines[i]) or i <= toc_end:
+            continue
+        m = CHAPTER_KEYWORD_HEAD_RE.match(s)
+        if m:
+            num = int(m.group(1)) if m.group(1) else None
+            name = _clean_anchor_title(re.sub(r"^#{1,6}\s*", "", s))
+            name = re.sub(r"^(?:Chapter|Unit|Lesson|Lecci[óo]n|Lezione|Unit[ée]|Kapitel)\s*\d*\s*", "", name, flags=re.I).strip()
+            raw.append((i, num, name or None))
+            continue
+        if QUOTE_TAIL_ATTR_RE.search(s) or QUOTE_ATTR_LINE_RE.match(s):
+            start = quote_block_start(i)
+            if start < i and is_quote_opener(i):
+                raw.append((start, None, None))
+            continue
+        m2 = PAGE_NUM_HEAD_RE.match(s)
+        if m2:
+            n = int(m2.group(1))
+            if n in toc:
+                raw.append((i, n, None))
+
+    raw_sorted = sorted(raw)
+    explicit = [(li, n, nm) for (li, n, nm) in raw_sorted if n]
+
+    def look_ahead_num(line_idx: int, window: int = 300):
+        """往后 300 行内有没有「章号页眉 / 章标题」——有就借它的号。
+
+        章号页眉一般比章首名言晚半页～一页（OCR 也常只抓到页眉那个数字），
+        所以「名言锚点 + 后面 300 行内的显式章号」= 同一章。
+        """
+        for li, n, _nm in explicit:
+            if li > line_idx and li - line_idx <= window:
+                return n
+        return None
+
+    # 第 1 章：很多书第 1 章不带名言 → 从目录最后一行之后的第一个正文行开始
+    last_toc = max(
+        (i for i in range(scan_end)
+         if TOC_CHAPTER_LINE_RE.match(lines[i].strip()) or TOC_CHAPTER_LINE_CN_RE.match(lines[i].strip())),
+        default=None,
+    )
+    ch1_start = 0
+    if last_toc is not None:
+        ch1_start = last_toc + 1
+        while ch1_start < scan_end and is_noise(lines[ch1_start]):
+            ch1_start += 1
+    slots = [(ch1_start, 1, None)]
+    last_num, last_line = 1, ch1_start
+
+    # 逐个锚点定号：带显式章号的直接用；没号的先借后方的章号，再退化成「上一个号 + 1」。
+    # 与上一个**已接受**章首距离 < 200 行的候选（同一章里的页眉、重复提及）只用来补章名，不开新章。
+    for line_idx, num, name in raw_sorted:
+        if line_idx - last_line < QUOTE_ANCHOR_MERGE_GAP:
+            if name and not slots[-1][2]:
+                slots[-1] = (slots[-1][0], slots[-1][1], name)
+            continue
+        if num is None:
+            num = look_ahead_num(line_idx) or (last_num + 1)
+        if num <= last_num:
+            continue
+        slots.append((line_idx, num, name))
+        last_num, last_line = num, line_idx
+    if len(slots) < 3:
+        return None
+
+    # 缺号章：用相邻真锚点 + 目录页码按比例插值（标 estimated）
+    filled = []
+    for idx, (line_idx, num, name) in enumerate(slots):
+        if filled and num - filled[-1][1] > 1:
+            prev_line, prev_num = filled[-1][0], filled[-1][1]
+            for gap in range(1, num - prev_num):
+                tgt = prev_num + gap
+                p_prev, p_tgt, p_next = (
+                    toc.get(prev_num, (None, None))[1],
+                    toc.get(tgt, (None, None))[1],
+                    toc.get(num, (None, None))[1],
+                )
+                if None in (p_prev, p_tgt, p_next) or p_next == p_prev:
+                    pos = prev_line + (line_idx - prev_line) * gap // (num - prev_num)
+                else:
+                    ratio = (p_tgt - p_prev) / (p_next - p_prev)
+                    pos = prev_line + int((line_idx - prev_line) * ratio)
+                filled.append((pos, tgt, toc.get(tgt, (None,))[0], True))
+        filled.append((line_idx, num, name, False))
+
+    starts = []
+    titles = []
+    estimated = []
+    for line_idx, num, name, est in filled:
+        nm = name or toc.get(num, (None,))[0] or f"第 {num} 章"
+        if est:
+            nm = f"{nm}（章界估算·按目录页数插值）"
+            estimated.append(num)
+        starts.append(line_idx)
+        titles.append(nm)
+    # 去重保序
+    keep, seen = [], set()
+    for st, ti in zip(starts, titles):
+        if st in seen:
+            continue
+        seen.add(st)
+        keep.append((st, ti))
+    starts = [k[0] for k in keep]
+    titles = [k[1] for k in keep]
+    if len(starts) < 3:
+        return None
+    print(
+        f"[名言切分] 目录 {len(toc)} 章｜定位到 {len(slots)} 章 → 补足到 {len(starts)} 章"
+        + (f"（其中 {estimated} 为页数插值估算）" if estimated else "")
+    )
+    plan = _plan_from_starts(text, starts, back_line)
+    plan["bounds"] = [
+        (num, titles[i], pos) for i, (num, _t, pos) in enumerate(plan["bounds"])
+    ]
+    plan["estimated_missing"] = estimated
+    plan["quote_anchor"] = True
+    return plan
+
+
+def build_unit_anchor_plan(text: str, opener_pattern: str = ""):
+    """按「每单元固定小节 + 单元主题标题」切分（无章号教材专用）。
+
+    返回与 build_chapter_plan 同构的 dict（可含 front_matter / back_matter），
+    锚点太少（< 3 个单元）时返回 None，让上层继续用别的策略。
+    """
+    lines = text.split("\n")
+    offsets = _line_offsets(lines)
+    opener_re = DEFAULT_UNIT_OPENER_RE
+    if opener_pattern:
+        try:
+            opener_re = re.compile(opener_pattern, re.I)
+        except re.error:
+            print("[单元切分] --opener-pattern 不是有效正则，改用默认的单元小节表。")
+
+    # 书后部分：先用确定的书后标记，找不到再用通用启发式
+    back_line = None
+    for i in range(int(len(lines) * 0.5), len(lines)):
+        s = lines[i].strip()
+        if not s or len(s) > 80:
+            continue
+        if BACK_MATTER_HEAD_RE.match(s):
+            back_line = i
+            break
+    if back_line is None:
+        back_line = _find_back_matter_cutoff(lines)
+    scan_end = back_line if back_line is not None else len(lines)
+
+    def is_skippable(s: str) -> bool:
+        return not s.strip() or s.lstrip().startswith(("<", "![", "|"))
+
+    def nearest_heading_above(i: int) -> int:
+        """锚点行向上找最近的标题行（最多 6 行），找不到就用锚点自己。
+
+        `# 你的幸运数字是什么？` / `# LOS NÚMEROS ... 序数词和基数词（二）` / `## 本课聚焦`
+        这种连续几行标题的情况，取最上面那一行当单元起点，免得“单元标题落在上一块末尾”。
+        """
+        best = i
+        top = i
+        for k in range(i, max(-1, i - 6), -1):
+            s = lines[k]
+            if s.lstrip().startswith("#"):
+                best, top = k, k
+            elif is_skippable(s):
+                continue
+            else:
+                break
+        return top if best != i or lines[i].lstrip().startswith("#") else i
+
+    cand = set()
+    n_opener = 0
+    n_theme = 0
+    for i in range(scan_end):
+        s = lines[i]
+        if is_skippable(s):
+            continue
+        if opener_re.match(s):
+            cand.add(nearest_heading_above(i))
+            n_opener += 1
+        elif _is_unit_theme_anchor(s):
+            cand.add(i)
+            n_theme += 1
+    starts = []
+    for a in sorted(cand):
+        if starts and a - starts[-1] < UNIT_ANCHOR_MERGE_GAP:
+            continue
+        starts.append(a)
+    if len(starts) < 3:
+        return None
+    # 自检①：必须真的找到「每单元反复出现的固定小节」（如 `本课聚焦`）。
+    # 只有零散主题标题时不可靠 —— 《专业课D》《西方经济学》实测会被切成 40+ 块。
+    if n_opener < max(3, int(len(starts) * 0.4)):
+        print(
+            f"[单元切分] 固定小节只有 {n_opener} 处（{len(starts)} 个候选单元）→ "
+            "缺「每单元都有的小节」这个证据，不用本策略"
+        )
+        return None
+    # 自检②：如果这些锚点标题自带章号（`UNIDAD 8` / `第八课` / `Chapter 3`）而且**章号大量重复**，
+    # 说明这是一本"有编号体系"的书（同一章有多个标题行）→ 该交给编号引擎 / 收尾小节引擎，
+    # 主题标题策略切出来会把同一章拆成好几块（《某外语教材1》实测 16 章会被切成 47 块）。
+    _nums = [n for n in (_unit_number(_clean_anchor_title(lines[i])) for i in starts) if n]
+    if _nums and len(set(_nums)) < len(_nums) * 0.8:
+        print(
+            f"[单元切分] 锚点里章号重复（{len(_nums)} 个锚点只有 {len(set(_nums))} 个章号）"
+            "→ 这是有编号体系的书，跳过本策略"
+        )
+        return None
+    print(
+        f"[单元切分] 固定小节 {n_opener} 处 + 主题标题 {n_theme} 处 → "
+        f"合并为 {len(starts)} 个单元（无章号教材策略）"
+    )
+    plan = _plan_from_starts(text, starts, back_line)
+    # 主题标题当章名时不要被 _chapter_label 加前缀（它认不出这类标题就会返回空）
+    generic_titles = [_clean_anchor_title(lines[i]) for i in starts]
+    plan["bounds"] = [
+        (num, generic_titles[idx] or title, pos)
+        for idx, (num, title, pos) in enumerate(plan["bounds"])
+    ]
+    plan["unit_anchor"] = True
+    return plan
 
 
 def _is_wide_head(s: str) -> bool:
@@ -1938,49 +2435,15 @@ def process_file(src: Path, out_root: Path, max_chars: int, overlap: int, args):
     chunk_no = 0
     units = None
     if mode == "chapter":
-        generic = build_chapter_plan(text, getattr(args, "opener_pattern", ""))
-        plan_info = generic
-        how = "通用标题识别"
-        end_pat = (getattr(args, "chapter_end_pattern", "") or "auto").strip()
-        title_pat = getattr(args, "chapter_title_pattern", "")
-        start_pat = getattr(args, "chapter_start_pattern", "")
-        explicit = end_pat not in ("", "auto", "off", "none", "no")
-        if end_pat.lower() in ("off", "none", "no"):
-            end_pat = ""
-        if end_pat == "auto":
-            hint = f"{args.book_name} {src.stem} {src.parent.name}"
-            for kw, ep, tp in END_ANCHOR_PRESETS:
-                if kw.lower() in hint.lower():
-                    end_pat, title_pat = ep, (title_pat or tp)
-                    print(
-                        f"[章界识别] 命中预设《{kw}》：按每章收尾小节定位章界"
-                        f"（锚点正则：{ep}）"
-                    )
-                    break
-            else:
-                end_pat = ""
-        cand = None
-        if end_pat:
-            cand = build_chapter_plan_by_end_anchor(text, end_pat, title_pat, start_pat)
-        elif args.chapter_end_pattern:
-            # auto 但没命中预设：从正文里自己挖「每章固定小节」
-            cand = discover_chapter_plan(text)
-        if cand and cand.get("bounds"):
-            n_cand, n_cur = len(cand["bounds"]), len(plan_info["bounds"]) if plan_info else 0
-            # 只有通用识别明显没切好（<4 章，或章数不到对方一半多一点）才改写，
-            # 避免拿一个更细的重复小节把正常的章表拆碎
-            better = n_cand > n_cur and (
-                explicit or n_cur < 4 or n_cand >= n_cur * 2.2
-            )
-            if better:
-                plan_info, how = cand, "按每章收尾小节定位"
-                if not explicit:
-                    print(f"[章界识别] 收尾小节定位 {n_cand} 章 > 通用识别 {n_cur} 章，用前者")
-            else:
-                print(
-                    f"[章界识别] 收尾小节定位到 {n_cand} 章，不如通用识别（{n_cur} 章），"
-                    "保留通用结果"
-                )
+        _hint = f"{args.book_name} {src.stem} {src.parent.name}"
+        plan_info, how, _diag = choose_chapter_plan(
+            text,
+            hint=_hint,
+            opener_pattern=getattr(args, "opener_pattern", ""),
+            end_pattern_arg=getattr(args, "chapter_end_pattern", "") or "auto",
+            title_pat=getattr(args, "chapter_title_pattern", ""),
+            start_pat=getattr(args, "chapter_start_pattern", ""),
+        )
         plan = plan_info["bounds"] if plan_info else None
         if plan:
             print(
@@ -2146,6 +2609,179 @@ def process_file(src: Path, out_root: Path, max_chars: int, overlap: int, args):
         print(f"book_id: {book_id} | source_hash: {short_hash}…（重复拆分会原地更新并备份旧文件）")
 
 
+def audit_plans(files, out_root: Path, args) -> None:
+    """只读审计：对每个输入（PDF / 全文 .md / 书文件夹）跑四策略选优，只打印不落盘。"""
+    targets = [f for f in files if f.suffix.lower() == ".md" and f.name.startswith("00-MinerU")]
+    if not targets:  # 传进来的是 PDF：找同名的解析全文
+        for f in files:
+            guess = out_root / f.stem / "00-MinerU解析全文.md"
+            if guess.exists():
+                targets.append(guess)
+            else:
+                print(f"[跳过] 没有解析全文（先拆一次 PDF）：{f.name}")
+    if not targets and (out_root / "00-MinerU解析全文.md").exists():
+        targets.append(out_root / "00-MinerU解析全文.md")
+
+    print(f"{'书':<28} {'通用':>4} {'单元':>4} {'名言':>4} {'收尾':>4}  {'选中':<10} {'盘上':>4}")
+    print("-" * 92)
+    import contextlib as _ctx
+    import io as _io
+
+    for md in targets:
+        text = md.read_text(encoding="utf-8")
+        book_dir = md.parent
+        hint = f"{book_dir.name} {md.stem}"
+        _book_id = book_dir.name
+        _buf = _io.StringIO()
+        try:
+            with _ctx.redirect_stdout(_buf):
+                    plan, how, diag = choose_chapter_plan(
+                    text,
+                    hint=hint,
+                    opener_pattern=getattr(args, "opener_pattern", ""),
+                    end_pattern_arg=getattr(args, "chapter_end_pattern", "") or "auto",
+                    title_pat=getattr(args, "chapter_title_pattern", ""),
+                    start_pat=getattr(args, "chapter_start_pattern", ""),
+                    verbose=False,
+                )
+        except Exception as exc:  # noqa: BLE001
+            print(f"{book_dir.name[:26]:<28} [审计失败] {exc}")
+            continue
+        on_disk = len(list(book_dir.glob("章节*.md")))
+        flag = ""
+        if plan:
+            extra = on_disk - len(plan["bounds"])
+            if abs(extra) > 2:
+                flag = f"  ⚠️ 盘上多/少 {extra} 块"
+        print(
+            f"{book_dir.name[:26]:<28} {diag['generic']:>4} "
+            f"{str(diag['unit'] if diag['unit'] is not None else '-'):>4} "
+            f"{str(diag['quote'] if diag['quote'] is not None else '-'):>4} "
+            f"{str(diag['end'] if diag['end'] is not None else '-'):>4}  "
+            f"{how[:10]:<10} {on_disk:>4}{flag}"
+        )
+    print("\n（只读审计：没有写任何文件。要真重切就去掉 --audit）")
+
+
+def choose_chapter_plan(
+    text: str,
+    hint: str = "",
+    opener_pattern: str = "",
+    end_pattern_arg: str = "auto",
+    title_pat: str = "",
+    start_pat: str = "",
+    verbose: bool = True,
+):
+    """四策略选优，返回 (plan_info, how, diag)。
+
+    顺序：① 编号引擎 → ② 每章固定收尾小节（有编号体系的教材优先走这条）
+    → ③ 每单元固定小节/主题标题 → ④ 名言开场/章号页眉。
+    门槛（谁赢）见 `04-教材分块/📖 教材分块说明.md` 的「🧩 切分策略」。
+    `diag` 里带各候选的章数，供 `--audit` 打印。
+    """
+    def log(*a):
+        if verbose:
+            print(*a)
+
+    diag = {"generic": 0, "unit": None, "quote": None, "end": None, "numbered_book": False}
+
+    if not opener_pattern:
+        for kw, op in OPENER_PRESETS:
+            if kw.lower() in hint.lower():
+                opener_pattern = op
+                log(f"[章界识别] 命中开场小节预设《{kw}》→ 用 {op!r} 定位章界")
+                break
+    diag["opener_pattern"] = opener_pattern
+
+    plan_info = build_chapter_plan(text, opener_pattern)
+    diag["generic"] = len(plan_info["bounds"]) if plan_info else 0
+    how = "通用标题识别"
+
+    end_pat = (end_pattern_arg or "auto").strip()
+    title_pat = title_pat or ""
+    start_pat = start_pat or ""
+    explicit = end_pat not in ("", "auto", "off", "none", "no")
+    if end_pat.lower() in ("off", "none", "no"):
+        end_pat = ""
+    if end_pat == "auto":
+        for kw, ep, tp in END_ANCHOR_PRESETS:
+            if kw.lower() in hint.lower():
+                end_pat, title_pat = ep, (title_pat or tp)
+                log(f"[章界识别] 命中预设《{kw}》：按每章收尾小节定位章界（锚点正则：{ep}）")
+                break
+        else:
+            end_pat = ""
+
+    # ② 每章固定收尾小节：先算候选
+    end_cand_early = None
+    if end_pat:
+        end_cand_early = build_chapter_plan_by_end_anchor(text, end_pat, title_pat, start_pat)
+    elif end_pattern_arg:
+        end_cand_early = discover_chapter_plan(text)
+    diag["end"] = len(end_cand_early["bounds"]) if end_cand_early else None
+
+    # 「有编号体系的教材」判定：① 白名单；② 收尾小节切出「章名自带章号 + ≥8 章 + 从书前半开始」的完整章表
+    numbered_book = any(k.lower() in hint.lower() for k in NUMBERED_BOOK_KEYWORDS) or bool(
+        end_cand_early
+        and len(end_cand_early.get("bounds") or []) >= 8
+        and _looks_numbered_sequence(end_cand_early, len(text))
+        and (not plan_info or len(plan_info["bounds"]) < 4)
+    )
+    if numbered_book and end_cand_early is None:
+        numbered_book = False
+    diag["numbered_book"] = numbered_book
+    if numbered_book:
+        plan_info, how = end_cand_early, "按每章收尾小节定位"
+        log(
+            f"[章界识别] 收尾小节定位出完整的 1..{len(end_cand_early['bounds'])} 编号章表"
+            " → 判定为有编号体系的教材，直接采用（跳过无章号策略）"
+        )
+
+    # ③ 每单元固定小节 + 主题标题
+    unit_cand = None if numbered_book else build_unit_anchor_plan(text, opener_pattern)
+    if unit_cand and unit_cand.get("bounds"):
+        n_u = len(unit_cand["bounds"])
+        diag["unit"] = n_u
+        n_cur = len(plan_info["bounds"]) if plan_info else 0
+        if n_u >= 3 and (n_cur < 4 or n_u >= n_cur * 2.2):
+            plan_info, how = unit_cand, "按每单元固定小节/主题标题定位"
+            log(f"[单元切分] 定位到 {n_u} 个单元 > 通用识别 {n_cur} 个，改用单元切分（无章号教材策略）")
+        else:
+            log(f"[单元切分] 定位到 {n_u} 个单元，不如通用识别（{n_cur} 个），保留通用结果")
+    elif not numbered_book:
+        diag["unit"] = None
+
+    # ④ 名言开场 + 章号页眉
+    quote_cand = None if numbered_book else build_quote_anchor_plan(text)
+    if quote_cand and quote_cand.get("bounds"):
+        n_q = len(quote_cand["bounds"])
+        diag["quote"] = n_q
+        n_real = n_q - len(quote_cand.get("estimated_missing") or [])
+        well_formed = n_real >= max(3, int(n_q * 0.6))
+        n_cur = len(plan_info["bounds"]) if plan_info else 0
+        if n_q >= 3 and well_formed and (n_cur < 4 or n_q >= n_cur * 1.5):
+            plan_info, how = quote_cand, "按每章名言开场/章号页眉定位"
+            log(f"[名言切分] 定位到 {n_q} 章 > 当前 {n_cur} 章，改用名言切分")
+        else:
+            log(f"[名言切分] 定位到 {n_q} 章，不如当前（{n_cur} 章），保留现有结果")
+
+    # ② 兜底比较（没有判定为编号教材时，收尾小节仍可凭"明显更细"胜出）
+    cand = None if numbered_book else end_cand_early
+    if cand and cand.get("bounds"):
+        n_cand = len(cand["bounds"])
+        n_cur = len(plan_info["bounds"]) if plan_info else 0
+        better = n_cand > n_cur and (explicit or n_cur < 4 or n_cand >= n_cur * 2.2)
+        if better:
+            plan_info, how = cand, "按每章收尾小节定位"
+            if not explicit:
+                log(f"[章界识别] 收尾小节定位 {n_cand} 章 > 通用识别 {n_cur} 章，用前者")
+        else:
+            log(f"[章界识别] 收尾小节定位到 {n_cand} 章，不如通用识别（{n_cur} 章），保留通用结果")
+    diag["chosen"] = len(plan_info["bounds"]) if plan_info else 0
+    diag["how"] = how
+    return plan_info, how, diag
+
+
 def main():
     parser = argparse.ArgumentParser(description="把厚教材拆成 AI 友好的小分块")
     parser.add_argument("input", help="教材文件或包含教材的文件夹")
@@ -2199,6 +2835,11 @@ def main():
         "--mineru-model",
         default="vlm",
         help="MinerU 模型：vlm（推荐）/ pipeline（默认 vlm）",
+    )
+    parser.add_argument(
+        "--audit",
+        action="store_true",
+        help="只读审计：对每本书打印四策略各自的章数 + 会选中哪个（不写任何文件）",
     )
     parser.add_argument(
         "--mineru-dry-run",
@@ -2259,6 +2900,15 @@ def main():
         files = sorted(p for p in src.rglob("*") if p.suffix.lower() in SUPPORTED)
     else:
         files = [src]
+
+    if args.audit:
+        if src.is_dir():          # 审计整个分块库：直接找每本书的解析全文
+            audit_plans(sorted(src.rglob("00-MinerU解析全文.md")), out_root, args)
+        elif src.suffix.lower() == ".md":
+            audit_plans([src], out_root, args)
+        else:
+            audit_plans([], out_root, args)
+        return
 
     if not files:
         print("没有找到 PDF 文件。")

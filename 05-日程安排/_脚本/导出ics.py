@@ -69,8 +69,14 @@ def collect(cfg: dict, win_lo: datetime, win_hi: datetime, ics_override: str | N
     else:
         paths = S.resolve_ics_paths(cfg)
     courses: list = []
+    holiday_log: list[dict] = []
     for p in paths:
-        courses += S.parse_ics(p, tz, win_lo, win_hi, tuple(cfg.get("ics_skip_summary_prefixes", ["📚"])))
+        courses += S.parse_ics(p, tz, win_lo, win_hi,
+                               tuple(cfg.get("ics_skip_summary_prefixes", ["📚"])),
+                               holiday_log=holiday_log)
+    if holiday_log:
+        names = sorted({d["start"].strftime("%m-%d") for d in holiday_log})
+        print(f"🎌 法定节假日：跳过 {len(holiday_log)} 条课表事件（{'、'.join(names)}）")
     events = tasks + courses
     events.sort(key=lambda t: (t["start"], t["all_day"], t["t_start"] or t["start"], t["title"]))
     return events, courses

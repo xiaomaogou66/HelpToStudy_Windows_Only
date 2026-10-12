@@ -112,7 +112,8 @@ jobs:
             Write-Host "OK  $($f.Name)  CRLF=$crlf"
           }
           foreach ($must in @("_工具\拆书.bat", "05-日程安排\_脚本\同步日程.bat",
-                              "05-日程安排\_脚本\自检.bat", "05-日程安排\00-配置\多端同步.md")) {
+                              "05-日程安排\_脚本\自检.bat", "05-日程安排\_脚本\假期块.bat",
+                              "05-日程安排\_脚本\更新节假日.bat", "05-日程安排\00-配置\多端同步.md")) {
             if (-not (Test-Path -LiteralPath $must)) { throw "缺少 $must" }
           }
           Write-Host "关键启动器与文档齐备"

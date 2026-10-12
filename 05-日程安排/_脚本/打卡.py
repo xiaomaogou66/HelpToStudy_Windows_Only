@@ -45,6 +45,7 @@ _force_utf8_io()
 
 
 import sync_gcal as S  # noqa: E402  复用 ics 解析 + 配置
+import 节假日 as H  # noqa: E402  法定节假日（00-配置/节假日.json）
 
 # 规则住在 00-配置/（人改的）；旧位置 _脚本/ 下的底线规则.json 仍然兼容
 def _resolve_rules_file() -> Path:
@@ -101,6 +102,7 @@ def courses_by_day(mon: datetime, sun: datetime, cfg: dict) -> dict:
 
 
 STOP_PREFIX = "停课 · "
+HOLIDAY_PREFIX = "假期 · "      # 法定节假日：那节课自动取消，改留一条已勾的记录
 
 
 def stopped_on(day: datetime, rules: dict) -> list[str]:
@@ -109,6 +111,22 @@ def stopped_on(day: datetime, rules: dict) -> list[str]:
     if not isinstance(table, dict):
         return []
     return [str(x) for x in (table.get(day.strftime("%Y-%m-%d")) or []) if isinstance(x, str)]
+
+
+def holiday_weekday(day: datetime, rules: dict) -> int:
+    """调休补课：那天按「补课那天的星期」算（规则里 例外.调休补课 {日期: 1–7}）。
+
+    例：2026-10-10 是周六，但学校补周三的课 → 写 3，那条『星期六地铁泛听』那天就不出项。
+    """
+    table = (rules.get("例外") or {}).get("调休补课") or {}
+    if not isinstance(table, dict):
+        return day.isoweekday()
+    got = table.get(day.strftime("%Y-%m-%d"))
+    try:
+        wd = int(got)                      # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return day.isoweekday()
+    return wd if 1 <= wd <= 7 else day.isoweekday()
 
 
 def _course_template(rules: dict) -> str | None:
@@ -136,16 +154,25 @@ def _triggers(rules: dict) -> list[tuple[dict, list[str]]]:
     return out
 
 
-def _fmt(text: str, course: tuple | None = None) -> str:
-    """把 {课程名}/{开始}/{结束} 占位换成真实值（没有对应值时去掉占位）。"""
+def _fmt(text: str, course: tuple | None = None, extra: dict | None = None) -> str:
+    """把 {课程名}/{开始}/{结束}（+ extra 里的 {假期}/{假期学习} 等）换成真实值。"""
     name, t1, t2 = course or ("", "", "")
-    return (text.replace("{课程名}", name).replace("{开始}", t1)
-                .replace("{结束}", t2)).strip()
+    out = (text.replace("{课程名}", name).replace("{开始}", t1)
+                .replace("{结束}", t2))
+    for k, v in (extra or {}).items():
+        out = out.replace("{" + str(k) + "}", str(v))
+    return out.strip()
 
 
 def build_items(day: datetime, courses: list, rules: dict) -> list[str]:
-    """一天的打卡项 = 每节课一项（出勤）+ 停课记录 + 触发规则项 + 每天都有。"""
+    """一天的打卡项 = 每节课一项（出勤）+ 放假/停课记录 + 触发规则项 + 每天都有。"""
     items: list[str] = []
+
+    # 法定节假日（00-配置/节假日.json）：那天本来就停课 —— 不出勤、不计缺勤，
+    # 改留一条已勾的「假期 · 节日名」，并让 `假期` 条件的触发项（假期学习定额）上线。
+    holiday = H.holiday_name(day)
+    if holiday:
+        courses = []
 
     # 临时停课：那节课从出勤打卡里去掉，改留一条已勾的「停课 · …」记录（不计缺勤）
     stopped = stopped_on(day, rules)
@@ -162,6 +189,8 @@ def build_items(day: datetime, courses: list, rules: dict) -> list[str]:
     # 停课记录按它本来该在的时间位置插回去（规则里形如「专业课C 14:00–16:45」）
     for s in stopped:
         timed.append((s.split()[-1].split("–")[0], f"{STOP_PREFIX}{s}"))
+    if holiday:
+        timed.append(("00:00", f"{HOLIDAY_PREFIX}{holiday}"))
     timed.sort(key=lambda kv: kv[0])
     items += [text for _t, text in timed]
 
@@ -170,6 +199,17 @@ def build_items(day: datetime, courses: list, rules: dict) -> list[str]:
     for cond, projs in _triggers(rules):
         if not projs:
             continue
+        if "假期" in cond:                       # 只在假期（True）/ 只在非假期（False）出项
+            if bool(cond.get("假期")) != bool(holiday):
+                continue
+        # 起止日期条件（2026-10-07 加）：`自` = 从这天起才出现，`至` = 到这天为止
+        since, until = cond.get("自") or cond.get("从"), cond.get("至") or cond.get("到")
+        if since or until:
+            today_s = day.strftime("%Y-%m-%d")
+            if since and today_s < str(since):
+                continue
+            if until and today_s > str(until):
+                continue
         pattern, weekday = cond.get("课程匹配"), cond.get("星期")
         hits: list[tuple] = []
         if pattern:
@@ -182,7 +222,7 @@ def build_items(day: datetime, courses: list, rules: dict) -> list[str]:
                 continue                       # 课程条件没命中 → 这项今天不出现
         if weekday is not None:
             try:
-                if int(weekday) != day.isoweekday():
+                if int(weekday) != holiday_weekday(day, rules):
                     continue
             except (TypeError, ValueError):
                 continue
@@ -192,11 +232,12 @@ def build_items(day: datetime, courses: list, rules: dict) -> list[str]:
             if slot["course"] is None and hits:
                 slot["course"] = (hits[0][1], hits[0][0], "")
 
+    sub = {"假期": holiday or "", "假期学习": H.study_quota_text()}
     for proj, slot in merged.items():
-        text = _fmt(proj, slot["course"])
+        text = _fmt(proj, slot["course"], sub)
         carriers = slot["carriers"]
         items.append(f"{text}　（{' / '.join(carriers)}）" if carriers else text)
-    items += [i for i in rules.get("每天都有", []) if i not in merged]
+    items += [_fmt(i, None, sub) for i in rules.get("每天都有", []) if i not in merged]
     return items
 
 
@@ -227,6 +268,8 @@ def render(week: str, days: list[tuple[datetime, list[str]]], existing: dict,
         "> 今天勾完 +1，今天没勾完数字不动（不会归零）。",
         ">",
         "> **临时停课**（学校临时通知）：那天那节课不算缺勤——出勤项去掉，改留一条已勾的「停课 · …」记录。",
+        "> **法定节假日**（`00-配置/节假日.json`）：那天没课、不计缺勤——出勤项换成一条已勾的「假期 · 节日名」，并挂「假期学习 4–6 小时」定额。",
+        "> **假期学习**：节假日每天 4–6h（没人排课的日子最容易整天滑掉）；任务行用 `./假期块.bat <周号>` 生成后贴进周决策。",
         "",
     ]
     for d, items in days:
@@ -239,7 +282,7 @@ def render(week: str, days: list[tuple[datetime, list[str]]], existing: dict,
             for item in items:
                 was = existing.get((key, item))
                 # 停课是「事实记录」不是待办：默认已勾，且重跑也不会掉
-                mark = "x" if (was or item.startswith(STOP_PREFIX)) else " "
+                mark = "x" if (was or item.startswith((STOP_PREFIX, HOLIDAY_PREFIX))) else " "
                 lines.append(f"- [{mark}] {d:%m-%d} · {item}")
         lines.append("")
     lines.append("> 打卡页由 `_脚本/打卡.bat` 生成；重复运行只补缺失项，**不会清掉你已勾的**。")
@@ -300,6 +343,19 @@ def main() -> int:
     for d, items in days:
         tag = " ".join(i.split("　")[0] for i in items) or "—"
         print(f"   {d:%m-%d} {WEEKDAY_CN[d.weekday()]}  {tag}")
+    hd = H.week_holidays(mon)
+    if hd:
+        print(f"   🎌 法定节假日 {len(hd)} 天：" + "、".join(f"{d:%m-%d} {n}" for d, n in hd))
+        print(f"       假期学习定额 {H.study_quota_text()}/天 → `./假期块.bat {week}` 生成任务行贴进周决策")
+    mk = H.week_makeup_days(mon)
+    if mk:
+        print(f"   🔁 调休上班日：" + "、".join(f"{d:%m-%d}（{n}）" for d, n in mk)
+              + " —— 可能补课，课表里没有，要补就手工加单次事件后重跑本脚本")
+    for i in range(7):
+        d = mon + timedelta(days=i)
+        wd = holiday_weekday(d, rules)
+        if wd != d.isoweekday():
+            print(f"   📌 {d:%m-%d} 按调休补课算作 {WEEKDAY_CN[wd - 1]}（`星期` 规则按它判）")
     return 0
 
 

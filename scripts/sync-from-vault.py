@@ -50,15 +50,28 @@ COPY_PATHS = [
 ]
 # 从库拷目录时要排除的东西（个人数据 / 平台专属脚本 / 缓存）
 EXCLUDE_NAMES = {
-    "__pycache__", ".venv", ".打卡.log", "周表.tsv", "today.sh",
+    "__pycache__", ".venv", ".打卡.log", ".勾选.lock", "周表.tsv", "today.sh",
     "打卡.sh", "周文件夹.sh", "同步日历.sh", "同步日程.sh", "自检.sh",
+    "假期块.sh", "更新节假日.sh",
     "同步日历.desktop",
+    # 桌面待办小组件（Noctalia）只有 Linux 桌面有 —— Windows 版连引擎一起不带
+    "勾选.py", "勾选.sh",
 }
 EXCLUDE_GLOBS = ["🔒*", "calender-*", "service-account*", "token.json", "credentials.json", "*.tmp"]
+
+# ─────────────────── 整块剔除（Linux 桌面专属） ───────────────────
+# 库里的 `<!-- managed: 名称 -->` … `<!-- /managed -->` 若只对 Linux 有意义，就在这儿按名字整块删掉
+DROP_MANAGED = ["桌面待办小组件"]
 
 # ─────────────────── Windows 措辞适配 ───────────────────
 # 顺序重要：长串在前，避免半截替换
 WINDOWS_MAP = [
+    # ── 「桌面待办小组件」整块不进 Windows 版：Noctalia（niri 的桌面壳）只有 Linux 桌面才有 ──
+    ("| `05-日程安排/_脚本/勾选.sh list` | 桌面小组件 | 列今天可勾的条目（加 `--json` 给小组件用） |\n"
+     "| `05-日程安排/_脚本/勾选.sh check\\|uncheck <文件> <行号> <uid>` | 桌面小组件 | 命令行勾选/取消（`--dry-run` 预演），与桌面点一下等价 |\n"
+     "| `noctalia msg plugin <你的用户名>/vault-todo:todo all refresh` | 桌面小组件 | 让小组件立刻重读库 |\n", ""),
+    ("                     noctalia插件/vault-todo/  ← 桌面待办小组件源码（库外插件的备份，非 .md 不进图谱）\n", ""),
+    ("勾选.sh · 周表.tsv", "假期块.bat · 更新节假日.bat · 周表.tsv"),
     ("_工具/设置MinerU令牌.sh", "_工具/设置MinerU令牌.bat"),
     ("环境配置.sh", "环境配置.bat"),
     ("安装.sh", "安装.bat"),
@@ -78,6 +91,8 @@ WINDOWS_MAP = [
     ("周文件夹.sh", "周文件夹.bat"),
     ("打卡.sh", "打卡.bat"),
     ("自检.sh", "自检.bat"),
+    ("假期块.sh", "假期块.bat"),
+    ("更新节假日.sh", "更新节假日.bat"),
     ("today.sh", "today.bat"),
     ("同步日历.desktop", "同步日历.bat"),
     ("python3 ", "python "),
@@ -189,6 +204,9 @@ def adapt_and_scrub(dry: bool, pairs: list[tuple[str, str]]) -> tuple[int, int]:
             o = t
             for a, b in WINDOWS_MAP:
                 t = t.replace(a, b)
+            for name in DROP_MANAGED:
+                t = re.sub(rf"(?ms)^<!-- managed: {re.escape(name)} -->\n.*?^<!-- /managed -->\n\n?",
+                           "", t)
             for a, b in pairs:
                 t = t.replace(a, b)
             if t != o:

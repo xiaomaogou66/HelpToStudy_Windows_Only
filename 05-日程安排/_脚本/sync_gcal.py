@@ -207,9 +207,30 @@ def _parse_ics_dt(pairs, tz):
     return None
 
 
+def holiday_skip_dates() -> frozenset[str]:
+    """法定放假日（`00-配置/节假日.json`）：那几天的课表事件直接跳过（≈ 自动 EXDATE）。
+
+    读不到配置就返回空集 —— 节假日配置坏了绝不能让课表同步挂掉。
+    """
+    try:
+        import 节假日 as _H
+        return _H.holiday_dates()
+    except Exception:                                      # noqa: BLE001
+        return frozenset()
+
+
 def parse_ics(path: Path, tz, win_lo: datetime, win_hi: datetime,
-              cfg_skip_prefixes: tuple[str, ...] = ()) -> list[dict]:
-    """把 .ics 里的 VEVENT（含 FREQ=WEEKLY 循环）展开成窗口内的一条条事件。"""
+              cfg_skip_prefixes: tuple[str, ...] = (),
+              skip_dates: frozenset | set | None = None,
+              holiday_log: list | None = None) -> list[dict]:
+    """把 .ics 里的 VEVENT（含 FREQ=WEEKLY 循环）展开成窗口内的一条条事件。
+
+    skip_dates：落在这些日期（YYYY-MM-DD）里的实例直接丢掉 —— 用来实现「法定节假日自动停课」。
+    传 None 表示自动读 `00-配置/节假日.json`；传空集可以关掉这个行为。
+    holiday_log：非 None 时，被跳过的实例会 append 进去（供调用方报「🎌 跳过 N 条」）。
+    """
+    if skip_dates is None:
+        skip_dates = holiday_skip_dates()
     raw = _unfold(path.read_text(encoding="utf-8", errors="ignore"))
     out: list[dict] = []
     for block in re.findall(r"BEGIN:VEVENT(.*?)END:VEVENT", raw, re.S):
@@ -264,12 +285,19 @@ def parse_ics(path: Path, tz, win_lo: datetime, win_hi: datetime,
                 if limit is not None and emitted >= limit:
                     break
                 if d >= win_lo and d not in exdates:
-                    starts.append(d)
+                    if d.strftime("%Y-%m-%d") in skip_dates:
+                        if holiday_log is not None:
+                            holiday_log.append({"title": first("SUMMARY"), "start": d})
+                    else:
+                        starts.append(d)
                 emitted += 1
                 d += step
                 guard += 1
         elif win_lo <= start < win_hi and start not in exdates:
-            starts.append(start)
+            if start.strftime("%Y-%m-%d") not in skip_dates:
+                starts.append(start)
+            elif holiday_log is not None:
+                holiday_log.append({"title": first("SUMMARY"), "start": start})
 
         base_uid = first("UID") or first("SUMMARY")
         for s in starts:
@@ -682,12 +710,18 @@ def main() -> int:
         print(f"📚 本次课表来源（--ics 覆盖）：{args.ics}")
 
     courses: list[dict] = []
+    holiday_log: list[dict] = []
     if True:
         for ics_path in ics_paths:
             courses += parse_ics(
                 ics_path, tz, win_lo, win_hi,
                 tuple(cfg.get("ics_skip_summary_prefixes", ["📚"])),
+                holiday_log=holiday_log,
             )
+    if holiday_log:
+        names = sorted({d["start"].strftime("%m-%d") for d in holiday_log})
+        print(f"🎌 法定节假日：跳过 {len(holiday_log)} 条课表事件（{'、'.join(names)}）"
+              f" —— 表在 00-配置/节假日.json，跑 ./更新节假日.bat 刷新")
     in_window += courses
     in_window.sort(key=lambda t: (t["start"], t["all_day"], t["t_start"] or t["start"], t["title"]))
 
