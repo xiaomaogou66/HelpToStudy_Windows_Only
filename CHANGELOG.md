@@ -8,17 +8,19 @@
 
 - `scripts/build-release.ps1` 一次构建三份资产（每份都是完整的库，解压即用）：
   - `HelpToStudy-Vault-<tag>.zip` 全量（学习 + 日程安排）
-  - `HelpToStudy-学习版-Vault-<tag>.zip` 只有学习部分
+  - `HelpToStudy-Learn-Vault-<tag>.zip`（学习版）只有学习部分
     （不含 `05-日程安排`、`/周决策`、`/课表` 及对应 skill）
-  - `HelpToStudy-日程版-Vault-<tag>.zip` 只有日程安排层 + 安装器（可后装进已有库）
-- 三个一键入口：`HelpToStudy-QuickInstall.bat`（全量）、`HelpToStudy-学习版-QuickInstall.bat`、
-  `HelpToStudy-日程版-QuickInstall.bat`，分别内嵌 `-Part all / learn / schedule`
+  - `HelpToStudy-Schedule-Vault-<tag>.zip`（日程版）只有日程安排层 + 安装器（可后装进已有库）
+    （资产名一律 ASCII：`gh` 会把非 ASCII 文件名截掉，中文名会传成 `-xxx.bat`）
+- 三个一键入口：`HelpToStudy-QuickInstall.bat`（全量）、`HelpToStudy-Learn-QuickInstall.bat`（学习版）、
+  `HelpToStudy-Schedule-QuickInstall.bat`（日程版），分别内嵌 `-Part all / learn / schedule`
 - `install.ps1` / `QuickInstall.ps1` 新增 `-Part`：`all`（默认）/ `learn` / `schedule`
   （也接受中文 `全部` / `学习` / `日程`）
   - `learn`：只装 `00`–`04` + 拆书工具 + 学习类命令；不建 `05-日程安排`、不装日程依赖
   - `schedule`：只往库里补第六层 + `/周决策` `/课表`（及对应 skill）；学习内容与个人笔记一律不动
   - 两轮安装可叠加：先 `learn` 再 `schedule` 就是完整库
-- Release 资产改成「三份包 + 三个入口 + 说明」，发布步骤幂等（Release 已存在只覆盖资产）
+- Release 资产改成「三份包 + 三个入口 + 说明」；本仓库开了**不可变 Release**，
+  所以发布流程固定为「建草稿 → 传资产 → 发布」（要更新就先删旧 Release 再建，tag 保留）
 - CI：构建后校验三份包的内容边界（学习版不含 `05-日程安排/`、日程版不含 `01`–`04`/`_工具`）、
   三个引导器必须 CRLF 且带 `-Part`；冒烟作业新增「学习版 / 日程版 / 叠加安装」三条安装检查
 

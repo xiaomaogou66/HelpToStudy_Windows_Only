@@ -37,9 +37,9 @@
 
 | 我想要 | 下载这个 | 装出来是什么 |
 | --- | --- | --- |
-| **只学** | **HelpToStudy-学习版-QuickInstall.bat** | 学习部分（不含 `05-日程安排`，也不带 `/周决策` `/课表`） |
-| **只排日程** | **HelpToStudy-日程版-QuickInstall.bat** | 只装第六层 + `/周决策` `/课表`；可随时补装进已有库 |
-| **两个都要**（推荐） | **HelpToStudy-QuickInstall.bat** | 两部分一次装好 |
+| **只学** | **HelpToStudy-Learn-QuickInstall.bat**（学习版） | 学习部分（不含 `05-日程安排`，也不带 `/周决策` `/课表`） |
+| **只排日程** | **HelpToStudy-Schedule-QuickInstall.bat**（日程版） | 只装第六层 + `/周决策` `/课表`；可随时补装进已有库 |
+| **两个都要**（推荐） | **HelpToStudy-QuickInstall.bat**（全量） | 两部分一次装好 |
 
 ### 推荐方式：Release 单文件引导器
 
@@ -86,8 +86,8 @@
 如果浏览器拦截下载、想离线安装，或想先看看内容再装：
 
 1. 到 **Releases** 下载 `HelpToStudy-Vault-<版本>.zip`（或克隆本仓库）
-   —— 只要学习部分就下 `HelpToStudy-学习版-Vault-<版本>.zip`，只补日程层就下
-   `HelpToStudy-日程版-Vault-<版本>.zip`
+   —— 只要学习部分就下 `HelpToStudy-Learn-Vault-<版本>.zip`，只补日程层就下
+   `HelpToStudy-Schedule-Vault-<版本>.zip`
 2. 解压后先双击「**环境配置.bat**」，检测/安装环境
    （`环境配置.bat -CheckOnly` 只查不装；`环境配置.bat -SkipClaude`
    跳过 Claude Code；装完会自动打开 cc-switch 供粘贴 API Key）

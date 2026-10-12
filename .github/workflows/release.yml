@@ -50,11 +50,11 @@ jobs:
           $tag = "${{ steps.build.outputs.tag }}"
           $outDir = Join-Path $env:RUNNER_TEMP "release"
           $full  = "HelpToStudy-Vault-$tag.zip"
-          $learn = "HelpToStudy-学习版-Vault-$tag.zip"
-          $sched = "HelpToStudy-日程版-Vault-$tag.zip"
+          $learn = "HelpToStudy-Learn-Vault-$tag.zip"
+          $sched = "HelpToStudy-Schedule-Vault-$tag.zip"
           foreach ($n in @($full, $learn, $sched,
-                           "HelpToStudy-QuickInstall.bat", "HelpToStudy-学习版-QuickInstall.bat",
-                           "HelpToStudy-日程版-QuickInstall.bat", "release-notes.md")) {
+                           "HelpToStudy-QuickInstall.bat", "HelpToStudy-Learn-QuickInstall.bat",
+                           "HelpToStudy-Schedule-QuickInstall.bat", "release-notes.md")) {
             if (-not (Test-Path -LiteralPath (Join-Path $outDir $n))) { throw "缺少资产：$n" }
           }
           Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -114,25 +114,33 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ steps.build.outputs.tag }}"
+          $repo = "$env:GITHUB_REPOSITORY"
           $outDir = Join-Path $env:RUNNER_TEMP "release"
           $assets = @(Get-ChildItem -LiteralPath $outDir -File |
                       Where-Object { $_.Name -ne "release-notes.md" } |
                       Select-Object -ExpandProperty FullName)
+          # 本仓库开了「不可变 Release」：发布后的资产不能再上传/替换，所以固定走
+          # 「建草稿 → 传资产 → 发布」；要更新就先把旧 Release 删掉再重建（tag 保留）。
           $exists = $false
           try {
-            gh release view "$tag" --repo "$env:GITHUB_REPOSITORY" *> $null
+            gh release view "$tag" --repo $repo *> $null
             $exists = ($LASTEXITCODE -eq 0)
           } catch {
             $exists = $false
           }
           if ($exists) {
-            Write-Host "Release $tag 已存在：只覆盖资产，不改说明正文"
-            gh release upload "$tag" @assets --clobber --repo "$env:GITHUB_REPOSITORY"
-          } else {
-            gh release create "$tag" @assets --repo "$env:GITHUB_REPOSITORY" `
-              --notes-file (Join-Path $outDir "release-notes.md")
+            Write-Host "Release $tag 已存在：删除后重建（不可变 Release 的资产改不了；tag 保留）"
+            gh release delete "$tag" --yes --repo $repo
+            if ($LASTEXITCODE -ne 0) { throw "删除旧 Release 失败" }
           }
+          gh release create "$tag" --draft --repo $repo `
+            --title "AI 学习工作流 $tag" --notes-file (Join-Path $outDir "release-notes.md")
+          if ($LASTEXITCODE -ne 0) { throw "创建草稿 Release 失败" }
+          gh release upload "$tag" @assets --repo $repo
+          if ($LASTEXITCODE -ne 0) { throw "上传资产失败" }
+          gh release edit "$tag" --draft=false --repo $repo
           if ($LASTEXITCODE -ne 0) { throw "发布 Release 失败" }
+          gh release view "$tag" --repo $repo
 
   # 只报告、不卡发布：CI 里没有真机桌面，但 Python 层与仓库内容能查
   smoke:

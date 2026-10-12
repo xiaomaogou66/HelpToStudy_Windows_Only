@@ -61,6 +61,7 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 # part: all / learn / schedule —— 与 install.ps1 -Part 一一对应
 # 学习版 = 全量去掉日程安排层（第六层）与它的两个命令、两个 skill
 # 日程版 = 只放日程安排层 + 安装器 + 它的两个命令、两个 skill（可后装）
+# 注意：资产名一律用 ASCII —— `gh` 会把非 ASCII 文件名截掉，中文名会传成 `-xxx.bat`
 $PackageTable = @(
     [pscustomobject]@{
         Part  = "all"
@@ -72,15 +73,15 @@ $PackageTable = @(
     [pscustomobject]@{
         Part  = "learn"
         Label = "学习版"
-        Zip   = "HelpToStudy-学习版-Vault-$Tag.zip"
-        Bat   = "HelpToStudy-学习版-QuickInstall.bat"
+        Zip   = "HelpToStudy-Learn-Vault-$Tag.zip"
+        Bat   = "HelpToStudy-Learn-QuickInstall.bat"
         Title = "AI Learning Workflow - learn only"
     },
     [pscustomobject]@{
         Part  = "schedule"
         Label = "日程版"
-        Zip   = "HelpToStudy-日程版-Vault-$Tag.zip"
-        Bat   = "HelpToStudy-日程版-QuickInstall.bat"
+        Zip   = "HelpToStudy-Schedule-Vault-$Tag.zip"
+        Bat   = "HelpToStudy-Schedule-QuickInstall.bat"
         Title = "AI Learning Workflow - schedule layer only"
     }
 )
@@ -261,9 +262,9 @@ try {
 
 | 我想要 | 下载这个 | 装出来是什么 |
 | --- | --- | --- |
-| **只学**（拆书 / 主题 / 学案 / 测试 / 速查表） | **HelpToStudy-学习版-QuickInstall.bat** | 学习部分：``00``–``04``、拆书工具、学习类命令与 skills |
-| **只排日程**（周决策 / 打卡 / 课表 / 日历双后端） | **HelpToStudy-日程版-QuickInstall.bat** | 第六层：``05-日程安排/`` ＋ ``/周决策`` ``/课表``；可装进已有库 |
-| **两个都要**（推荐） | **HelpToStudy-QuickInstall.bat** | 上面两部分，一次装好 |
+| **只学**（拆书 / 主题 / 学案 / 测试 / 速查表） | **HelpToStudy-Learn-QuickInstall.bat**（学习版） | 学习部分：``00``–``04``、拆书工具、学习类命令与 skills |
+| **只排日程**（周决策 / 打卡 / 课表 / 日历双后端） | **HelpToStudy-Schedule-QuickInstall.bat**（日程版） | 第六层：``05-日程安排/`` ＋ ``/周决策`` ``/课表``；可装进已有库 |
+| **两个都要**（推荐） | **HelpToStudy-QuickInstall.bat**（全量） | 上面两部分，一次装好 |
 
 三个包互不影响、可以叠加：先装学习版，之后想加日程就再跑一次日程版引导器。
 
@@ -285,8 +286,8 @@ try {
 ```
 .\HelpToStudy-QuickInstall.bat -VaultPath "D:\我的资料\AI学习工作流"
 .\HelpToStudy-QuickInstall.bat -SkipEnv
-.\HelpToStudy-学习版-QuickInstall.bat -NoOpenObsidian
-.\HelpToStudy-日程版-QuickInstall.bat -VaultPath "D:\我的资料\AI学习工作流"
+.\HelpToStudy-Learn-QuickInstall.bat -NoOpenObsidian
+.\HelpToStudy-Schedule-QuickInstall.bat -VaultPath "D:\我的资料\AI学习工作流"
 ```
 
 | 参数 | 作用 |
@@ -303,8 +304,8 @@ try {
 
 ## 手动安装（备用）
 
-下载对应的 ZIP（``HelpToStudy-Vault-$Tag.zip`` / ``HelpToStudy-学习版-Vault-$Tag.zip`` /
-``HelpToStudy-日程版-Vault-$Tag.zip``），解压后先双击「环境配置.bat」，再双击「安装.bat」。
+下载对应的 ZIP（``HelpToStudy-Vault-$Tag.zip`` 全量 / ``HelpToStudy-Learn-Vault-$Tag.zip`` 学习版 /
+``HelpToStudy-Schedule-Vault-$Tag.zip`` 日程版），解压后先双击「环境配置.bat」，再双击「安装.bat」。
 
 ## 常见问题
 
